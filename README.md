@@ -64,6 +64,24 @@ HOST=127.0.0.1 node server.js
 POST /api/analyze-image
 ```
 
+## 后端状态持久化
+
+当前版本新增轻量后端状态接口，不需要先接数据库：
+
+```text
+GET /api/state
+PUT /api/state
+GET /api/health
+```
+
+运行时数据会保存到本机：
+
+```text
+data/state.json
+```
+
+`data/` 已加入 `.gitignore`，不会上传到 GitHub。前端启动时会先用浏览器本地数据快速渲染，然后从 `/api/state` 拉取后端状态；每次项目、素材、画布位置变化后，会自动防抖保存到后端。
+
 如果前端和后端分离部署，可以在浏览器控制台设置后端地址：
 
 ```js
@@ -96,6 +114,8 @@ https://your-app.pages.dev
 ```bash
 cloudflared tunnel --url http://localhost:3000
 ```
+
+本机已经验证过 quick tunnel 模式，可以通过 Cloudflare 生成的 `trycloudflare.com` 临时地址访问。注意 quick tunnel 地址每次重启可能变化，适合测试；正式长期访问建议创建 Cloudflare named tunnel 并绑定自己的域名。
 
 本项目已准备好干净的 Cloudflare Pages 发布目录和压缩包：
 

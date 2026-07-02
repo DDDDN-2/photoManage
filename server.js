@@ -13,6 +13,9 @@ const qwenApiUrl =
 const qwenVisionModel = process.env.QWEN_VISION_MODEL || "qwen-vl-plus";
 const qwenClassifierModel = process.env.QWEN_CLASSIFIER_MODEL || process.env.QWEN_REASONING_MODEL || "qwen-plus";
 const maxJsonBytes = Number(process.env.MAX_UPLOAD_JSON_BYTES || 24 * 1024 * 1024);
+const maxStateJsonBytes = Number(process.env.MAX_STATE_JSON_BYTES || 200 * 1024 * 1024);
+const dataDir = path.join(root, "data");
+const stateFile = path.join(dataDir, "state.json");
 const defaultCanvasColumns = [
   { id: "source", title: "参考素材", hint: "角色、道具、原始图" },
   { id: "state", title: "角色 / 状态", hint: "表情、造型、姿态" },
@@ -35,6 +38,20 @@ const mimeTypes = {
 
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, `http://${request.headers.host}`);
+
+  if (url.pathname === "/api/health") {
+    sendJson(response, 200, {
+      ok: true,
+      service: "photoManage",
+      time: new Date().toISOString()
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/state") {
+    await handleState(request, response);
+    return;
+  }
 
   if (url.pathname === "/api/analyze-image") {
     await handleAnalyzeImage(request, response);
@@ -64,6 +81,80 @@ const server = http.createServer(async (request, response) => {
     response.end(data);
   });
 });
+
+async function handleState(request, response) {
+  if (request.method === "OPTIONS") {
+    sendJson(response, 204, {});
+    return;
+  }
+
+  if (request.method === "GET") {
+    try {
+      const state = readStoredState();
+      sendJson(response, 200, {
+        state,
+        updatedAt: state?.updatedAt || null
+      });
+    } catch (error) {
+      console.error(`[STATE:READ_ERROR] ${new Date().toISOString()} message=${error.message}`);
+      sendJson(response, 500, {
+        error: "STATE_READ_FAILED",
+        message: "读取后端状态失败。"
+      });
+    }
+    return;
+  }
+
+  if (request.method === "PUT" || request.method === "POST") {
+    try {
+      const body = await readJsonBody(request, maxStateJsonBytes, "保存数据太大，请先减少本地视频或改接对象存储。");
+      const state = sanitizeStoredState(body.state || body);
+      state.updatedAt = new Date().toISOString();
+      writeStoredState(state);
+      sendJson(response, 200, {
+        ok: true,
+        updatedAt: state.updatedAt
+      });
+    } catch (error) {
+      console.error(
+        `[STATE:WRITE_ERROR] ${new Date().toISOString()} code=${error.code || "UNKNOWN"} status=${error.statusCode || 500} message=${error.publicMessage || error.message}`
+      );
+      sendJson(response, error.statusCode || 500, {
+        error: error.code || "STATE_WRITE_FAILED",
+        message: error.publicMessage || "保存后端状态失败。"
+      });
+    }
+    return;
+  }
+
+  sendJson(response, 405, { error: "METHOD_NOT_ALLOWED" });
+}
+
+function readStoredState() {
+  if (!fs.existsSync(stateFile)) return null;
+  const raw = fs.readFileSync(stateFile, "utf8");
+  if (!raw.trim()) return null;
+  return sanitizeStoredState(JSON.parse(raw));
+}
+
+function writeStoredState(state) {
+  fs.mkdirSync(dataDir, { recursive: true });
+  const tmpFile = `${stateFile}.${process.pid}.tmp`;
+  fs.writeFileSync(tmpFile, `${JSON.stringify(state, null, 2)}\n`);
+  fs.renameSync(tmpFile, stateFile);
+}
+
+function sanitizeStoredState(value) {
+  const state = value && typeof value === "object" ? value : {};
+  return {
+    deletedProjectIds: Array.isArray(state.deletedProjectIds) ? state.deletedProjectIds.map(String) : [],
+    projects: Array.isArray(state.projects) ? state.projects : [],
+    assets: Array.isArray(state.assets) ? state.assets : [],
+    canvasLayouts: state.canvasLayouts && typeof state.canvasLayouts === "object" ? state.canvasLayouts : {},
+    feedback: Array.isArray(state.feedback) ? state.feedback : [],
+    updatedAt: typeof state.updatedAt === "string" ? state.updatedAt : null
+  };
+}
 
 async function handleAnalyzeImage(request, response) {
   const startedAt = Date.now();
@@ -370,14 +461,14 @@ function normalizeCanvasColumns(columns) {
   return normalized.length ? normalized : defaultCanvasColumns;
 }
 
-function readJsonBody(request) {
+function readJsonBody(request, limitBytes = maxJsonBytes, tooLargeMessage = "图片太大，请先压缩后再上传。") {
   return new Promise((resolve, reject) => {
     let body = "";
     request.setEncoding("utf8");
     request.on("data", (chunk) => {
       body += chunk;
-      if (body.length > maxJsonBytes) {
-        reject(publicError(413, "REQUEST_TOO_LARGE", "图片太大，请先压缩后再上传。"));
+      if (body.length > limitBytes) {
+        reject(publicError(413, "REQUEST_TOO_LARGE", tooLargeMessage));
         request.destroy();
       }
     });
@@ -397,7 +488,7 @@ function sendJson(response, statusCode, payload) {
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
     "access-control-allow-origin": "*",
-    "access-control-allow-methods": "POST, OPTIONS",
+    "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
     "access-control-allow-headers": "content-type"
   });
   if (statusCode === 204) {

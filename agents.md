@@ -1958,6 +1958,105 @@ curl http://localhost:3000 返回 HTTP/1.1 200 OK
 页面源码确认加载 20260629-trackpad-pan
 ```
 
+## 2026-07-02 后端状态持久化与 Cloudflare Tunnel
+
+用户需求：
+
+```text
+实现后端逻辑，并部署到 Cloudflare Tunnel，方便外网访问。
+```
+
+实现范围：
+
+```text
+在不引入数据库的前提下，先补一个轻量后端状态层。
+项目、素材、画布布局、反馈记录仍沿用当前前端数据结构。
+后端用本地 JSON 文件持久化，方便外网访问时多浏览器共享同一份状态。
+```
+
+已调整：
+
+```text
+server.js
+  新增 dataDir = data/
+  新增 stateFile = data/state.json
+  新增 MAX_STATE_JSON_BYTES，默认 200MB
+  新增 GET /api/health
+  新增 GET /api/state
+  新增 PUT /api/state
+  新增 handleState
+  新增 readStoredState / writeStoredState / sanitizeStoredState
+  writeStoredState 使用临时文件 + rename，降低写坏状态文件风险
+  readJsonBody 支持自定义请求体大小和错误文案
+  CORS allow-methods 增加 GET / PUT
+
+app.js
+  新增 backendSync
+  新增 hydrateBackendState
+  新增 scheduleBackendStateSave
+  新增 normalizeStoredState
+  新增 getApiBaseUrl
+  启动后先本地渲染，再异步 GET /api/state
+  后端有状态时合并到当前 state 并重新渲染
+  后端无状态时把当前 state 通过 PUT /api/state 初始化到后端
+  saveState 继续保存 localStorage，同时防抖同步到后端
+  后端状态过大写不进 localStorage 时，当前会话仍使用内存 state
+  analyzeUploadedImage 改为复用 getApiBaseUrl
+
+.gitignore
+  新增 data/
+  新增 .tools/
+  继续忽略 .env 和 photoManage-cloudflare-pages.zip
+
+README.md
+  新增后端状态持久化说明
+  新增 /api/state /api/health 说明
+  新增 quick tunnel 临时访问说明
+
+index.html
+  资源版本更新到 20260702-backend-state
+
+dist/
+  已同步 index.html / styles.css / app.js / _headers
+
+photoManage-cloudflare-pages.zip
+  已重新打包
+```
+
+Cloudflare Tunnel：
+
+```text
+GitHub release 下载 cloudflared 速度为 0，改用 pnpm dlx cloudflared 安装包装包。
+包装包安装后实际 cloudflared 路径：
+  ~/Library/pnpm/store/.../node_modules/cloudflared/bin/cloudflared
+
+已启动 quick tunnel：
+  https://writers-limited-fortune-researchers.trycloudflare.com
+
+说明：
+  这是 trycloudflare.com 临时地址，不保证长期固定。
+  终端里的 cloudflared 进程停止后，公网地址会失效。
+  正式长期访问建议创建 Cloudflare named tunnel 并绑定自定义域名。
+```
+
+验证结果：
+
+```text
+node --check app.js 通过
+node --check server.js 通过
+node --check dist/app.js 通过
+dist matches source
+本地：
+  GET http://localhost:3000/api/health 返回 ok=true
+  GET http://localhost:3000/api/state 返回 state=null
+公网：
+  GET https://writers-limited-fortune-researchers.trycloudflare.com 返回 200
+  GET /api/health 返回 ok=true
+  PUT /api/state 测试写入成功
+  GET /api/state 测试读取成功
+测试状态已删除，等待真实浏览器访问后初始化后端状态
+```
+
 ## 2026-06-23 画布素材磁力避让布局
 
 用户反馈：

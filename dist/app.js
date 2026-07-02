@@ -142,6 +142,11 @@ const canvasRuntime = {
   resize: null,
   wheelSaveTimer: null
 };
+const backendSync = {
+  hydrating: false,
+  saveTimer: null,
+  lastSnapshot: ""
+};
 let activeView = "library";
 let activeProject = "all";
 
@@ -197,24 +202,20 @@ const els = {
 
 render();
 bindEvents();
+hydrateBackendState();
 
 function loadState() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    if (saved && Array.isArray(saved.assets)) {
-      const deletedProjectIds = repairDeletedProjectIds(saved.deletedProjectIds);
-      const projects = normalizeProjects(saved.projects, deletedProjectIds);
-      return {
-        deletedProjectIds: hasUsableProjects(projects) ? deletedProjectIds : [],
-        projects: hasUsableProjects(projects) ? projects : normalizeProjects(defaultProjects, []),
-        assets: normalizeAssets(saved.assets),
-        feedback: saved.feedback || [],
-        canvasLayouts: saved.canvasLayouts || {}
-      };
-    }
+    const normalized = normalizeStoredState(saved);
+    if (normalized) return normalized;
   } catch {
     localStorage.removeItem(STORAGE_KEY);
   }
+  return getDefaultState();
+}
+
+function getDefaultState() {
   return {
     deletedProjectIds: [],
     projects: structuredClone(defaultProjects),
@@ -231,11 +232,86 @@ function loadState() {
 }
 
 function saveState() {
+  let snapshot = "";
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    snapshot = JSON.stringify(state);
+    localStorage.setItem(STORAGE_KEY, snapshot);
   } catch {
     console.warn("Local storage quota exceeded; current session still works.");
   }
+  scheduleBackendStateSave(snapshot);
+}
+
+function normalizeStoredState(saved) {
+  if (!saved || !Array.isArray(saved.assets)) return null;
+  const deletedProjectIds = repairDeletedProjectIds(saved.deletedProjectIds);
+  const projects = normalizeProjects(saved.projects, deletedProjectIds);
+  return {
+    deletedProjectIds: hasUsableProjects(projects) ? deletedProjectIds : [],
+    projects: hasUsableProjects(projects) ? projects : normalizeProjects(defaultProjects, []),
+    assets: normalizeAssets(saved.assets),
+    feedback: saved.feedback || [],
+    canvasLayouts: saved.canvasLayouts || {}
+  };
+}
+
+function getApiBaseUrl() {
+  return localStorage.getItem("photoManage.apiBaseUrl") || "";
+}
+
+async function hydrateBackendState() {
+  backendSync.hydrating = true;
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/state`, {
+      method: "GET",
+      cache: "no-store"
+    });
+    if (!response.ok) throw new Error("后端状态读取失败");
+    const payload = await response.json();
+    const remoteState = normalizeStoredState(payload.state);
+    if (remoteState) {
+      Object.assign(state, remoteState);
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      } catch {
+        console.warn("Remote state is larger than localStorage; using in-memory state for this session.");
+      }
+      render();
+      showToast("已从后端加载素材库");
+    } else {
+      backendSync.hydrating = false;
+      scheduleBackendStateSave(JSON.stringify(state), 0);
+    }
+  } catch (error) {
+    console.warn("Backend state sync disabled for this session.", error);
+  } finally {
+    backendSync.hydrating = false;
+  }
+}
+
+function scheduleBackendStateSave(snapshot = "", delay = 500) {
+  if (backendSync.hydrating) return;
+  const body = snapshot || JSON.stringify(state);
+  if (!body || body === backendSync.lastSnapshot) return;
+  window.clearTimeout(backendSync.saveTimer);
+  backendSync.saveTimer = window.setTimeout(async () => {
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/api/state`, {
+        method: "PUT",
+        headers: {
+          "content-type": "application/json"
+        },
+        body
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.message || "后端状态保存失败");
+      }
+      backendSync.lastSnapshot = body;
+    } catch (error) {
+      console.warn("Backend state save failed.", error);
+    }
+  }, delay);
 }
 
 function bindEvents() {
@@ -1388,7 +1464,7 @@ function handleFiles(fileList) {
 }
 
 async function analyzeUploadedImage(file, imageDataUrl, preferredProjectId = null) {
-  const apiBase = localStorage.getItem("photoManage.apiBaseUrl") || "";
+  const apiBase = getApiBaseUrl();
   const response = await fetch(`${apiBase}/api/analyze-image`, {
     method: "POST",
     headers: {
