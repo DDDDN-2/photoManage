@@ -267,6 +267,10 @@ async function hydrateBackendState() {
       method: "GET",
       cache: "no-store"
     });
+    if (response.status === 401) {
+      redirectToLogin();
+      return;
+    }
     if (!response.ok) throw new Error("后端状态读取失败");
     const payload = await response.json();
     const remoteState = normalizeStoredState(payload.state);
@@ -304,6 +308,10 @@ function scheduleBackendStateSave(snapshot = "", delay = 500) {
         },
         body
       });
+      if (response.status === 401) {
+        redirectToLogin();
+        return;
+      }
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
         throw new Error(payload.message || "后端状态保存失败");
@@ -313,6 +321,12 @@ function scheduleBackendStateSave(snapshot = "", delay = 500) {
       console.warn("Backend state save failed.", error);
     }
   }, delay);
+}
+
+function redirectToLogin() {
+  const loginBase = getApiBaseUrl() || "";
+  const next = encodeURIComponent(`${window.location.pathname}${window.location.search}`);
+  window.location.href = `${loginBase}/login?next=${next}`;
 }
 
 function bindEvents() {
@@ -1465,7 +1479,11 @@ function handleFiles(fileList) {
           showToast(isAudio ? "声音素材已归入音色列" : isVideo ? "视频素材已归入输出结果列" : "AI 识别完成");
         })
         .catch((error) => {
-          Object.assign(pendingAsset, makeFailedAnalysisAsset(file.name, uploadProjectId, error, isAudio ? "audio" : isVideo ? "video" : "image"));
+          const fallback = makeFailedAnalysisAsset(file.name, uploadProjectId, error, isAudio ? "audio" : isVideo ? "video" : "image");
+          if (!isAudio && !isVideo) {
+            delete fallback.thumbnail;
+          }
+          Object.assign(pendingAsset, fallback);
           showToast(error.message || (isAudio ? "声音素材处理失败，已移入待确认" : isVideo ? "视频素材处理失败，已移入待确认" : "AI 识别失败，已移入待确认"));
         })
         .finally(() => {

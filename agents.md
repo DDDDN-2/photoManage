@@ -1913,6 +1913,61 @@ node --check dist/app.js 通过
   [AI] 2026-07-02T03:19:19.605Z async=true vision=qwen-vl-plus classifier=qwen-plus file="async-job-purple-block.png" recommended=unassigned column=source confidence=0.6 duration=4135ms
 ```
 
+## 2026-07-02 待确认旧失败卡片排查
+
+用户反馈：
+
+```text
+刷新后画布里仍然出现多张「待确认 · 0%」卡片，例如「已生成图像 1 / 3」。
+```
+
+排查结论：
+
+```text
+当前后台日志没有这些新卡片对应的 async=true AI 成功记录。
+data/state.json 中也没有「已生成图像 1 / 3」这些素材。
+说明这些卡片大概率来自浏览器旧 localStorage 或旧页面内存状态，而不是当前后端状态。
+
+旧同步识别版本在长请求断连后会进入 catch：
+  makeFailedAnalysisAsset
+  status = pending
+  score = 0
+  thumbnail = 待确认占位图
+
+因此旧失败素材会显示成：
+  待确认 · 0%
+并且缩略图被替换成“待确认”占位图，容易误以为是 AI 识别成功后仍然待确认。
+```
+
+已调整：
+
+```text
+index.html
+  资源版本从 20260702-auth-login 更新为 20260702-async-jobs
+  让浏览器刷新后更明确地拉取新 app.js
+
+app.js
+  hydrateBackendState 如果 GET /api/state 返回 401，直接跳 /login
+  scheduleBackendStateSave 如果 PUT /api/state 返回 401，直接跳 /login
+  新增 redirectToLogin
+  图片识别失败时不再覆盖原图 thumbnail，保留用户上传的图片预览
+  音频 / 视频失败仍使用对应类型占位图
+
+dist/
+  已同步 index.html / styles.css / app.js / _headers
+
+photoManage-cloudflare-pages.zip
+  已重新打包
+```
+
+操作建议：
+
+```text
+如果页面仍显示旧「待确认 · 0%」卡片，先强制刷新浏览器。
+这些旧失败卡片不会自动变成 AI 成功结果，因为旧请求当时前端已经丢失了返回值。
+需要删除旧失败卡片后重新上传，或后续增加“重新识别”按钮。
+```
+
 ## 2026-06-24 图片素材误显示播放器修复
 
 用户反馈：
