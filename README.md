@@ -16,7 +16,44 @@ cp .env.example .env
 DASHSCOPE_API_KEY=你的百炼APIKey
 QWEN_VISION_MODEL=qwen-vl-plus
 QWEN_CLASSIFIER_MODEL=qwen-plus
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=换成一个强密码
+AUTH_SESSION_SECRET=换成一串随机长字符
 ```
+
+## 账号密码登录
+
+当前服务默认启用登录保护，避免 Cloudflare Tunnel 暴露到外网后被陌生人上传素材、读取资源或消耗视觉模型额度。
+
+需要在 `.env` 里配置：
+
+```text
+AUTH_ENABLED=true
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=换成一个强密码
+AUTH_SESSION_SECRET=换成一串随机长字符
+AUTH_MAX_AGE_SECONDS=604800
+```
+
+受保护范围：
+
+```text
+页面和静态资源
+GET /api/state
+PUT /api/state
+POST /api/analyze-image
+```
+
+公开范围：
+
+```text
+GET /login
+POST /api/login
+POST /api/logout
+GET /api/health
+```
+
+登录成功后服务端会写入 HttpOnly Cookie。`.env` 已加入 `.gitignore`，账号密码和 API Key 不会提交到 GitHub。
 
 启动：
 

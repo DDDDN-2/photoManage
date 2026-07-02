@@ -1743,6 +1743,103 @@ dist matches source
   http://localhost:3000
 ```
 
+## 2026-07-02 账号密码登录保护
+
+用户要求：
+
+```text
+加一个账户密码登录，避免 Cloudflare Tunnel 外网访问时资源被侵占。
+```
+
+已调整：
+
+```text
+server.js
+  新增服务端登录保护，默认 AUTH_ENABLED=true
+  新增 /login 登录页
+  新增 POST /api/login
+  新增 POST /api/logout
+  /api/logout 仅接受 POST，GET 返回 405
+  使用 HttpOnly Cookie 保存登录会话
+  Cookie 默认：
+    name = pm_session
+    SameSite=Lax
+    Path=/
+    Max-Age=604800
+  会话 token 使用 AUTH_SESSION_SECRET 做 HMAC-SHA256 签名
+  未登录时：
+    页面和静态资源 302 跳转 /login
+    /api/state 与 /api/analyze-image 返回 401
+  保持 /api/health 公开，方便 tunnel / 监控检查
+  ADMIN_PASSWORD 未配置时不会放行资源访问
+
+index.html
+  顶部操作区新增「退出登录」按钮
+  资源版本更新到 20260702-auth-login
+
+app.js
+  新增 logoutButton 绑定
+  新增 handleLogout
+  点击退出登录会调用 /api/logout 清除 Cookie，并回到 /login
+  如果配置了 photoManage.apiBaseUrl，会跳转到对应后端登录页
+
+.env.example
+  新增 AUTH_ENABLED / ADMIN_USERNAME / ADMIN_PASSWORD / AUTH_SESSION_SECRET / AUTH_MAX_AGE_SECONDS 示例
+
+README.md
+  新增账号密码登录说明
+  记录受保护接口与公开接口
+
+.env
+  已在本机写入 ADMIN_USERNAME / ADMIN_PASSWORD / AUTH_SESSION_SECRET
+  .env 已在 .gitignore 中，不会提交真实密码和 API Key
+
+dist/
+  已同步 index.html / styles.css / app.js / _headers
+
+photoManage-cloudflare-pages.zip
+  已重新打包
+```
+
+验证结果：
+
+```text
+node --check server.js 通过
+node --check app.js 通过
+node --check dist/app.js 通过
+
+本地验证：
+  GET / 未登录 -> 302 /login?next=%2F
+  GET /api/state 未登录 -> 401
+  GET /api/health -> 200
+  POST /api/login 正确账号密码 -> 200
+  GET /api/state 带 Cookie -> 200
+  GET /api/logout -> 405
+  POST /api/logout -> 200
+  logout 后 GET / -> 302 /login?next=%2F
+  登录后首页包含「退出登录」
+
+公网 quick tunnel 验证：
+  GET / 未登录最终进入 /login
+  GET /api/state 未登录 -> 401
+  GET /api/health -> 200
+  POST /api/login 正确账号密码 -> 200
+  GET /api/state 带 Cookie -> 200
+```
+
+当前公网临时地址：
+
+```text
+https://writers-limited-fortune-researchers.trycloudflare.com
+```
+
+注意：
+
+```text
+quick tunnel 是临时地址，cloudflared 或本机服务停止后会失效。
+正式长期访问建议使用 Cloudflare named tunnel 并绑定域名。
+```
+
 ## 2026-06-24 图片素材误显示播放器修复
 
 用户反馈：

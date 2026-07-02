@@ -178,6 +178,7 @@ const els = {
   uploadButton: document.querySelector("#uploadButton"),
   dropZone: document.querySelector("#dropZone"),
   seedButton: document.querySelector("#seedButton"),
+  logoutButton: document.querySelector("#logoutButton"),
   projectForm: document.querySelector("#projectForm"),
   projectNameInput: document.querySelector("#projectNameInput"),
   projectDescInput: document.querySelector("#projectDescInput"),
@@ -386,6 +387,8 @@ function bindEvents() {
     render();
   });
 
+  els.logoutButton.addEventListener("click", handleLogout);
+
   els.projectForm.addEventListener("submit", (event) => {
     event.preventDefault();
     createProject();
@@ -424,6 +427,18 @@ function bindEvents() {
     closeAssetMenus();
     closeProjectMenus();
   });
+}
+
+async function handleLogout() {
+  try {
+    await fetch(`${getApiBaseUrl()}/api/logout`, {
+      method: "POST"
+    });
+  } catch (error) {
+    console.warn("Logout request failed.", error);
+  } finally {
+    window.location.href = `${getApiBaseUrl() || ""}/login`;
+  }
 }
 
 function render() {

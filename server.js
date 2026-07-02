@@ -1,4 +1,5 @@
 const http = require("node:http");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
@@ -16,6 +17,13 @@ const maxJsonBytes = Number(process.env.MAX_UPLOAD_JSON_BYTES || 24 * 1024 * 102
 const maxStateJsonBytes = Number(process.env.MAX_STATE_JSON_BYTES || 200 * 1024 * 1024);
 const dataDir = path.join(root, "data");
 const stateFile = path.join(dataDir, "state.json");
+const authEnabled = process.env.AUTH_ENABLED !== "false";
+const authUsername = process.env.ADMIN_USERNAME || process.env.AUTH_USERNAME || "admin";
+const authPassword = process.env.ADMIN_PASSWORD || process.env.AUTH_PASSWORD || "";
+const authSecret = process.env.AUTH_SESSION_SECRET || process.env.ADMIN_PASSWORD || crypto.randomBytes(32).toString("hex");
+const authCookieName = "pm_session";
+const authMaxAgeSeconds = Number(process.env.AUTH_MAX_AGE_SECONDS || 7 * 24 * 60 * 60);
+const authCookieSecure = process.env.AUTH_COOKIE_SECURE === "true";
 const defaultCanvasColumns = [
   { id: "source", title: "参考素材", hint: "角色、道具、原始图" },
   { id: "state", title: "角色 / 状态", hint: "表情、造型、姿态" },
@@ -45,6 +53,33 @@ const server = http.createServer(async (request, response) => {
       service: "photoManage",
       time: new Date().toISOString()
     });
+    return;
+  }
+
+  if (url.pathname === "/login") {
+    sendLoginPage(response);
+    return;
+  }
+
+  if (url.pathname === "/api/login") {
+    await handleLogin(request, response);
+    return;
+  }
+
+  if (url.pathname === "/api/logout") {
+    handleLogout(request, response);
+    return;
+  }
+
+  if (authEnabled && !isAuthenticated(request)) {
+    if (url.pathname.startsWith("/api/")) {
+      sendJson(response, 401, {
+        error: "UNAUTHENTICATED",
+        message: "请先登录。"
+      });
+      return;
+    }
+    redirectToLogin(response, url.pathname);
     return;
   }
 
@@ -81,6 +116,347 @@ const server = http.createServer(async (request, response) => {
     response.end(data);
   });
 });
+
+function sendLoginPage(response) {
+  const configWarning = authEnabled && !authPassword
+    ? `<div class="alert">服务端还没有配置 ADMIN_PASSWORD。请先在 .env 里设置账号密码，再重启服务。</div>`
+    : "";
+
+  response.writeHead(200, {
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": "no-store"
+  });
+  response.end(`<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>登录 - AI 图片素材库</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #292520;
+      --muted: #756f66;
+      --line: #ded6ca;
+      --paper: #f7f4ee;
+      --panel: #fffdfa;
+      --teal: #0f766e;
+      --danger: #b42318;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        linear-gradient(rgba(31, 27, 23, 0.04) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(31, 27, 23, 0.04) 1px, transparent 1px),
+        var(--paper);
+      background-size: 32px 32px;
+      color: var(--ink);
+    }
+    main {
+      width: min(420px, 100%);
+      padding: 30px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: 0 18px 50px rgba(35, 29, 22, 0.08);
+    }
+    .brand {
+      width: 58px;
+      height: 58px;
+      display: grid;
+      place-items: center;
+      margin-bottom: 18px;
+      border-radius: 8px;
+      background: #158a7f;
+      color: #fff;
+      font-weight: 900;
+      font-size: 24px;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 28px;
+      line-height: 1.15;
+      letter-spacing: 0;
+    }
+    p {
+      margin: 0 0 24px;
+      color: var(--muted);
+      line-height: 1.6;
+      font-weight: 650;
+    }
+    label {
+      display: block;
+      margin: 16px 0 8px;
+      color: var(--muted);
+      font-weight: 800;
+      font-size: 14px;
+    }
+    input {
+      width: 100%;
+      height: 48px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 0 14px;
+      font: inherit;
+      font-weight: 750;
+      color: var(--ink);
+      background: #fff;
+    }
+    input:focus {
+      outline: 3px solid rgba(15, 118, 110, 0.15);
+      border-color: var(--teal);
+    }
+    button {
+      width: 100%;
+      height: 50px;
+      margin-top: 22px;
+      border: 1px solid #0b5f58;
+      border-radius: 8px;
+      background: var(--teal);
+      color: #fff;
+      font: inherit;
+      font-weight: 900;
+      cursor: pointer;
+    }
+    button:disabled {
+      cursor: wait;
+      opacity: 0.72;
+    }
+    .error, .alert {
+      margin-top: 16px;
+      padding: 12px 14px;
+      border-radius: 8px;
+      line-height: 1.5;
+      font-weight: 800;
+    }
+    .error {
+      display: none;
+      color: var(--danger);
+      background: #fff1ef;
+      border: 1px solid #ffd2cc;
+    }
+    .alert {
+      color: #8a4b08;
+      background: #fff6d7;
+      border: 1px solid #f2d184;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="brand">AI</div>
+    <h1>登录素材库</h1>
+    <p>外网访问已启用账号密码保护，登录后才能上传、识别和查看资源。</p>
+    ${configWarning}
+    <form id="loginForm">
+      <label for="username">账号</label>
+      <input id="username" name="username" autocomplete="username" required autofocus />
+      <label for="password">密码</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required />
+      <button id="submitButton" type="submit">登录</button>
+      <div id="error" class="error"></div>
+    </form>
+  </main>
+  <script>
+    const form = document.getElementById("loginForm");
+    const button = document.getElementById("submitButton");
+    const errorBox = document.getElementById("error");
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      errorBox.style.display = "none";
+      button.disabled = true;
+      button.textContent = "登录中";
+      try {
+        const response = await fetch("/api/login", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            username: form.username.value,
+            password: form.password.value
+          })
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.message || "登录失败。");
+        const params = new URLSearchParams(location.search);
+        const next = params.get("next") || "/";
+        location.href = next.startsWith("/") && !next.startsWith("//") ? next : "/";
+      } catch (error) {
+        errorBox.textContent = error.message || "登录失败。";
+        errorBox.style.display = "block";
+      } finally {
+        button.disabled = false;
+        button.textContent = "登录";
+      }
+    });
+  </script>
+</body>
+</html>`);
+}
+
+async function handleLogin(request, response) {
+  if (request.method === "OPTIONS") {
+    sendJson(response, 204, {});
+    return;
+  }
+
+  if (request.method !== "POST") {
+    sendJson(response, 405, { error: "METHOD_NOT_ALLOWED" });
+    return;
+  }
+
+  if (!authEnabled) {
+    sendJson(response, 200, { ok: true, disabled: true });
+    return;
+  }
+
+  if (!authPassword) {
+    sendJson(response, 503, {
+      error: "AUTH_NOT_CONFIGURED",
+      message: "服务端未配置 ADMIN_PASSWORD，无法开放登录。"
+    });
+    return;
+  }
+
+  try {
+    const body = await readJsonBody(request, 64 * 1024, "登录请求太大。");
+    const username = String(body.username || "");
+    const password = String(body.password || "");
+
+    if (!safeEqual(username, authUsername) || !safeEqual(password, authPassword)) {
+      sendJson(response, 401, {
+        error: "INVALID_LOGIN",
+        message: "账号或密码不正确。"
+      });
+      return;
+    }
+
+    sendJson(
+      response,
+      200,
+      { ok: true },
+      {
+        "set-cookie": serializeCookie(authCookieName, createSessionToken(), {
+          maxAge: authMaxAgeSeconds
+        })
+      }
+    );
+  } catch (error) {
+    sendJson(response, error.statusCode || 500, {
+      error: error.code || "LOGIN_FAILED",
+      message: error.publicMessage || "登录失败。"
+    });
+  }
+}
+
+function handleLogout(request, response) {
+  if (request.method === "OPTIONS") {
+    sendJson(response, 204, {});
+    return;
+  }
+
+  if (request.method !== "POST") {
+    sendJson(response, 405, { error: "METHOD_NOT_ALLOWED" });
+    return;
+  }
+
+  sendJson(
+    response,
+    200,
+    { ok: true },
+    {
+      "set-cookie": serializeCookie(authCookieName, "", {
+        maxAge: 0
+      })
+    }
+  );
+}
+
+function redirectToLogin(response, nextPath) {
+  const safeNext = nextPath && nextPath.startsWith("/") && !nextPath.startsWith("//") ? nextPath : "/";
+  response.writeHead(302, {
+    location: `/login?next=${encodeURIComponent(safeNext)}`,
+    "cache-control": "no-store"
+  });
+  response.end();
+}
+
+function isAuthenticated(request) {
+  if (!authEnabled) return true;
+  if (!authPassword) return false;
+  const token = parseCookies(request)[authCookieName];
+  if (!token) return false;
+  return verifySessionToken(token);
+}
+
+function createSessionToken() {
+  const payload = Buffer.from(
+    JSON.stringify({
+      user: authUsername,
+      expiresAt: Date.now() + authMaxAgeSeconds * 1000
+    })
+  ).toString("base64url");
+  return `${payload}.${signSessionPayload(payload)}`;
+}
+
+function verifySessionToken(token) {
+  const [payload, signature] = String(token || "").split(".");
+  if (!payload || !signature) return false;
+  if (!safeEqual(signature, signSessionPayload(payload))) return false;
+
+  try {
+    const session = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    return session.user === authUsername && Number(session.expiresAt) > Date.now();
+  } catch {
+    return false;
+  }
+}
+
+function signSessionPayload(payload) {
+  return crypto.createHmac("sha256", authSecret).update(payload).digest("base64url");
+}
+
+function parseCookies(request) {
+  const cookies = {};
+  String(request.headers.cookie || "")
+    .split(";")
+    .forEach((part) => {
+      const index = part.indexOf("=");
+      if (index === -1) return;
+      const key = part.slice(0, index).trim();
+      const value = part.slice(index + 1).trim();
+      if (!key) return;
+      try {
+        cookies[key] = decodeURIComponent(value);
+      } catch {
+        cookies[key] = value;
+      }
+    });
+  return cookies;
+}
+
+function serializeCookie(name, value, options = {}) {
+  const parts = [
+    `${name}=${encodeURIComponent(value)}`,
+    "HttpOnly",
+    "SameSite=Lax",
+    "Path=/",
+    `Max-Age=${Number(options.maxAge || 0)}`
+  ];
+  if (authCookieSecure) parts.push("Secure");
+  return parts.join("; ");
+}
+
+function safeEqual(left, right) {
+  const leftBuffer = Buffer.from(String(left));
+  const rightBuffer = Buffer.from(String(right));
+  return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
 
 async function handleState(request, response) {
   if (request.method === "OPTIONS") {
@@ -483,13 +859,14 @@ function readJsonBody(request, limitBytes = maxJsonBytes, tooLargeMessage = "图
   });
 }
 
-function sendJson(response, statusCode, payload) {
+function sendJson(response, statusCode, payload, headers = {}) {
   response.writeHead(statusCode, {
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
     "access-control-allow-origin": "*",
     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
-    "access-control-allow-headers": "content-type"
+    "access-control-allow-headers": "content-type",
+    ...headers
   });
   if (statusCode === 204) {
     response.end();
