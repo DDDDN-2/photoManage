@@ -1441,12 +1441,18 @@ function handleMinimapClick(event) {
 }
 
 function handleFiles(fileList) {
-  const files = [...fileList].filter((file) => isImageFile(file) || isAudioFile(file) || isVideoFile(file));
+  const incomingFiles = [...fileList];
+  const files = incomingFiles.filter((file) => isImageFile(file) || isAudioFile(file) || isVideoFile(file));
+  if (!files.length) {
+    showToast(incomingFiles.length ? "没有识别到支持的图片、音频或视频文件" : "没有选择文件");
+    return;
+  }
+  showToast(`${files.length} 个素材正在上传`);
   const uploadProjectId = getActiveUploadProjectId();
   files.forEach((file) => {
     const reader = new FileReader();
     reader.addEventListener("load", async () => {
-      const mediaDataUrl = reader.result;
+      const mediaDataUrl = normalizeMediaDataUrl(file, reader.result);
       const isAudio = isAudioFile(file);
       const isVideo = isVideoFile(file);
       const uploadProject = uploadProjectId ? getProject(uploadProjectId) : null;
@@ -1870,15 +1876,42 @@ function cleanAssetTags(value) {
 }
 
 function isImageFile(file) {
-  return file?.type?.startsWith("image/");
+  return file?.type?.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|avif|heic|heif)$/i.test(file?.name || "");
 }
 
 function isAudioFile(file) {
-  return file?.type?.startsWith("audio/");
+  return file?.type?.startsWith("audio/") || /\.(mp3|wav|m4a|aac|ogg|flac|opus)$/i.test(file?.name || "");
 }
 
 function isVideoFile(file) {
-  return file?.type?.startsWith("video/");
+  return file?.type?.startsWith("video/") || /\.(mp4|mov|webm|m4v|avi|mkv)$/i.test(file?.name || "");
+}
+
+function normalizeMediaDataUrl(file, dataUrl) {
+  const source = String(dataUrl || "");
+  if (!source.startsWith("data:")) return source;
+  if (isImageFile(file) && !source.startsWith("data:image/")) {
+    const ext = String(file?.name || "").split(".").pop()?.toLowerCase();
+    const mime = {
+      jpg: "image/jpeg",
+      jpeg: "image/jpeg",
+      png: "image/png",
+      webp: "image/webp",
+      gif: "image/gif",
+      bmp: "image/bmp",
+      avif: "image/avif",
+      heic: "image/heic",
+      heif: "image/heif"
+    }[ext] || "image/jpeg";
+    return source.replace(/^data:[^,]*,/, `data:${mime},`);
+  }
+  if (isAudioFile(file) && !source.startsWith("data:audio/")) {
+    return source.replace(/^data:[^,]*,/, "data:audio/mpeg,");
+  }
+  if (isVideoFile(file) && !source.startsWith("data:video/")) {
+    return source.replace(/^data:[^,]*,/, "data:video/mp4,");
+  }
+  return source;
 }
 
 function isAudioAsset(asset) {

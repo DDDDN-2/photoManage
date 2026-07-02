@@ -1743,6 +1743,59 @@ dist matches source
   http://localhost:3000
 ```
 
+## 2026-07-02 上传无反应排查与 MIME 兜底
+
+用户反馈：
+
+```text
+在 Cloudflare Tunnel 公网地址点击上传后页面没有新增处理中卡片，看起来没有反应。
+```
+
+排查结论：
+
+```text
+后端日志没有出现新的 /api/assets 或 AI job 记录。
+data/state.json 和 GET /api/assets 中素材数量也没有增加。
+所以这不是“后台正在处理但前端没刷新”，而是前端没有成功把文件创建成后端 asset。
+```
+
+可能原因：
+
+```text
+handleFiles 之前只通过 file.type 判断文件类型。
+部分图片、音频或视频文件在浏览器里可能拿到空 MIME 或非标准 MIME。
+这类文件会被前端静默过滤，导致用户感觉点击上传没有任何反应。
+```
+
+已调整：
+
+```text
+app.js
+  handleFiles 增加 incomingFiles 和无可用文件 toast：
+    没有识别到支持的图片、音频或视频文件
+  进入上传流程后立即 toast：
+    N 个素材正在上传
+  isImageFile / isAudioFile / isVideoFile 增加文件扩展名兜底：
+    图片：png / jpg / jpeg / webp / gif / bmp / avif / heic / heif
+    音频：mp3 / wav / m4a / aac / ogg / flac / opus
+    视频：mp4 / mov / webm / m4v / avi / mkv
+  新增 normalizeMediaDataUrl：
+    当 FileReader 生成的 data URL MIME 为空或不匹配时，按文件扩展名补成 image/audio/video MIME
+
+dist/
+  已同步 app.js
+
+photoManage-cloudflare-pages.zip
+  已重新打包
+```
+
+验证结果：
+
+```text
+node --check app.js 通过
+node --check server.js 通过
+```
+
 ## 2026-07-02 账号密码登录保护
 
 用户要求：
