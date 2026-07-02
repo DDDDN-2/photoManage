@@ -1414,8 +1414,8 @@ function handleFiles(fileList) {
       type: isAudio ? "audio" : isVideo ? "video" : "image",
       title: "AI 识别中",
       description: uploadProject
-        ? `${mediaTypeLabel}已进入「${uploadProject.name}」项目画布，正在生成标题、标签和推荐理由。`
-        : `${mediaTypeLabel}已进入后台任务队列，正在生成标题、标签和项目推荐。`,
+        ? `${mediaTypeLabel}已进入「${uploadProject.name}」项目画布，后台正在识别并生成标题、标签和推荐理由。`
+        : `${mediaTypeLabel}已进入后台任务队列，正在识别并生成标题、标签和项目推荐。`,
       tags: ["处理中"],
       projectId: null,
       recommendedProjectId: uploadProjectId || "unassigned",
@@ -1480,35 +1480,89 @@ function handleFiles(fileList) {
 
 async function analyzeUploadedImage(file, imageDataUrl, preferredProjectId = null) {
   const apiBase = getApiBaseUrl();
+  const requestBody = {
+    fileName: file.name,
+    imageDataUrl,
+    preferredProjectId,
+    canvasColumns: CANVAS_COLUMNS.map((column) => ({
+      id: column.id,
+      title: column.title,
+      hint: column.hint
+    })),
+    projects: getProjects().map((project) => ({
+      id: project.id,
+      name: project.name,
+      description: project.description,
+      keywords: project.keywords
+    }))
+  };
+
+  const jobResponse = await fetch(`${apiBase}/api/analyze-image-jobs`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json"
+    },
+    body: JSON.stringify(requestBody)
+  });
+
+  const jobPayload = await jobResponse.json().catch(() => ({}));
+  if (jobResponse.status === 404) {
+    return analyzeUploadedImageSync(apiBase, requestBody);
+  }
+  if (!jobResponse.ok) {
+    throw new Error(jobPayload.message || "创建 AI 识别任务失败");
+  }
+  if (!jobPayload.jobId) {
+    throw new Error("AI 识别任务没有返回 jobId");
+  }
+
+  return pollImageAnalysisJob(apiBase, jobPayload.jobId);
+}
+
+async function analyzeUploadedImageSync(apiBase, requestBody) {
   const response = await fetch(`${apiBase}/api/analyze-image`, {
     method: "POST",
     headers: {
       "content-type": "application/json"
     },
-    body: JSON.stringify({
-      fileName: file.name,
-      imageDataUrl,
-      preferredProjectId,
-      canvasColumns: CANVAS_COLUMNS.map((column) => ({
-        id: column.id,
-        title: column.title,
-        hint: column.hint
-      })),
-      projects: getProjects().map((project) => ({
-        id: project.id,
-        name: project.name,
-        description: project.description,
-        keywords: project.keywords
-      }))
-    })
+    body: JSON.stringify(requestBody)
   });
 
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(payload.message || "AI 识别失败");
-  }
+  if (!response.ok) throw new Error(payload.message || "AI 识别失败");
 
   return payload.analysis;
+}
+
+async function pollImageAnalysisJob(apiBase, jobId) {
+  const startedAt = Date.now();
+  const timeoutMs = 8 * 60 * 1000;
+  let delayMs = 1500;
+
+  while (Date.now() - startedAt < timeoutMs) {
+    await sleep(delayMs);
+    const response = await fetch(`${apiBase}/api/analyze-image-jobs/${encodeURIComponent(jobId)}`, {
+      method: "GET",
+      cache: "no-store"
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.message || "读取 AI 识别任务失败");
+    }
+    if (payload.status === "completed" && payload.analysis) {
+      return payload.analysis;
+    }
+    if (payload.status === "failed") {
+      throw new Error(payload.message || "AI 识别失败");
+    }
+    delayMs = Math.min(5000, Math.round(delayMs * 1.25));
+  }
+
+  throw new Error("AI 识别时间过长，请稍后重试。");
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 async function analyzeUploadedAudio(file, audioDataUrl, preferredProjectId = null) {

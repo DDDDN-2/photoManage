@@ -1840,6 +1840,79 @@ quick tunnel 是临时地址，cloudflared 或本机服务停止后会失效。
 正式长期访问建议使用 Cloudflare named tunnel 并绑定域名。
 ```
 
+## 2026-07-02 AI 识别长耗时断连修复
+
+用户反馈：
+
+```text
+后台日志显示视觉模型识别成功，但前端卡片仍显示「待确认 · 0%」。
+```
+
+问题判断：
+
+```text
+后端日志中出现真实成功记录：
+  [AI] file="wx_camera_1782887672388.jpg" recommended=lulu column=source confidence=0.9 duration=104872ms
+
+但这次请求耗时约 105 秒。
+通过 Cloudflare Tunnel / 外网访问时，长请求容易在 100 秒附近被浏览器、代理或 tunnel 断开。
+结果是：
+  后端最终调用 Qwen 成功
+  前端 fetch 已经断开，收不到成功响应
+  前端 catch 分支执行 makeFailedAnalysisAsset
+  卡片被改成 pending / 0%
+
+所以不是模型没识别，而是同步请求太久导致前端收不到结果。
+```
+
+已调整：
+
+```text
+server.js
+  新增内存级 AI 识别任务表 aiJobs
+  新增 AI_JOB_TTL_MS，默认 30 分钟清理任务
+  新增 POST /api/analyze-image-jobs
+    读取上传 JSON 后立即创建 jobId
+    返回 202 + jobId
+    后台异步调用 qwen-vl-plus 与 qwen-plus
+  新增 GET /api/analyze-image-jobs/:jobId
+    返回 processing / completed / failed
+    completed 时返回 analysis
+  后台任务成功日志新增 async=true
+  保留旧 POST /api/analyze-image 同步接口，便于兼容和调试
+
+app.js
+  analyzeUploadedImage 改为优先调用 POST /api/analyze-image-jobs
+  前端拿到 jobId 后轮询 GET /api/analyze-image-jobs/:jobId
+  completed 后再更新素材标题、标签、项目、画布列和置信度
+  failed 才进入待确认兜底
+  如果新接口返回 404，会降级到旧同步 /api/analyze-image
+  处理中素材文案改为「后台正在识别」，避免用户误解为卡死
+
+dist/
+  已同步 index.html / styles.css / app.js / _headers
+
+photoManage-cloudflare-pages.zip
+  已重新打包
+```
+
+验证结果：
+
+```text
+node --check server.js 通过
+node --check app.js 通过
+node --check dist/app.js 通过
+
+本地异步识别测试：
+  POST /api/analyze-image-jobs -> 202 processing + jobId
+  GET /api/analyze-image-jobs/:jobId -> processing
+  GET /api/analyze-image-jobs/:jobId -> completed
+  返回 title = 紫色块状图形素材
+
+后台日志：
+  [AI] 2026-07-02T03:19:19.605Z async=true vision=qwen-vl-plus classifier=qwen-plus file="async-job-purple-block.png" recommended=unassigned column=source confidence=0.6 duration=4135ms
+```
+
 ## 2026-06-24 图片素材误显示播放器修复
 
 用户反馈：

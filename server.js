@@ -24,6 +24,8 @@ const authSecret = process.env.AUTH_SESSION_SECRET || process.env.ADMIN_PASSWORD
 const authCookieName = "pm_session";
 const authMaxAgeSeconds = Number(process.env.AUTH_MAX_AGE_SECONDS || 7 * 24 * 60 * 60);
 const authCookieSecure = process.env.AUTH_COOKIE_SECURE === "true";
+const aiJobs = new Map();
+const aiJobTtlMs = Number(process.env.AI_JOB_TTL_MS || 30 * 60 * 1000);
 const defaultCanvasColumns = [
   { id: "source", title: "参考素材", hint: "角色、道具、原始图" },
   { id: "state", title: "角色 / 状态", hint: "表情、造型、姿态" },
@@ -85,6 +87,17 @@ const server = http.createServer(async (request, response) => {
 
   if (url.pathname === "/api/state") {
     await handleState(request, response);
+    return;
+  }
+
+  if (url.pathname === "/api/analyze-image-jobs") {
+    await handleAnalyzeImageJobCreate(request, response);
+    return;
+  }
+
+  const analyzeJobMatch = url.pathname.match(/^\/api\/analyze-image-jobs\/([^/]+)$/);
+  if (analyzeJobMatch) {
+    handleAnalyzeImageJobStatus(request, response, analyzeJobMatch[1]);
     return;
   }
 
@@ -567,6 +580,129 @@ async function handleAnalyzeImage(request, response) {
       error: error.code || "AI_IMAGE_ANALYSIS_FAILED",
       message: error.publicMessage || "图片识别失败，请稍后重试。"
     });
+  }
+}
+
+async function handleAnalyzeImageJobCreate(request, response) {
+  if (request.method === "OPTIONS") {
+    sendJson(response, 204, {});
+    return;
+  }
+
+  if (request.method !== "POST") {
+    sendJson(response, 405, { error: "METHOD_NOT_ALLOWED" });
+    return;
+  }
+
+  if (!process.env.DASHSCOPE_API_KEY) {
+    sendJson(response, 503, {
+      error: "MISSING_DASHSCOPE_API_KEY",
+      message: "请先配置 DASHSCOPE_API_KEY 再启动服务。"
+    });
+    return;
+  }
+
+  try {
+    cleanupAiJobs();
+    const body = await readJsonBody(request);
+    const jobId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    const fileName = String(body.fileName || "untitled");
+    const job = {
+      id: jobId,
+      status: "processing",
+      fileName,
+      createdAt: now,
+      updatedAt: now,
+      completedAt: null,
+      analysis: null,
+      error: null
+    };
+    aiJobs.set(jobId, job);
+
+    runAnalyzeImageJob(job, body);
+
+    sendJson(response, 202, {
+      jobId,
+      status: job.status,
+      createdAt: job.createdAt
+    });
+  } catch (error) {
+    sendJson(response, error.statusCode || 500, {
+      error: error.code || "AI_IMAGE_JOB_CREATE_FAILED",
+      message: error.publicMessage || "创建图片识别任务失败。"
+    });
+  }
+}
+
+function handleAnalyzeImageJobStatus(request, response, jobId) {
+  if (request.method === "OPTIONS") {
+    sendJson(response, 204, {});
+    return;
+  }
+
+  if (request.method !== "GET") {
+    sendJson(response, 405, { error: "METHOD_NOT_ALLOWED" });
+    return;
+  }
+
+  cleanupAiJobs();
+  const job = aiJobs.get(jobId);
+  if (!job) {
+    sendJson(response, 404, {
+      error: "AI_JOB_NOT_FOUND",
+      message: "识别任务不存在或已过期，请重新上传。"
+    });
+    return;
+  }
+
+  sendJson(response, 200, {
+    jobId: job.id,
+    status: job.status,
+    fileName: job.fileName,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+    completedAt: job.completedAt,
+    analysis: job.status === "completed" ? job.analysis : null,
+    error: job.status === "failed" ? job.error?.code || "AI_IMAGE_ANALYSIS_FAILED" : null,
+    message: job.status === "failed" ? job.error?.message || "图片识别失败，请稍后重试。" : null
+  });
+}
+
+function runAnalyzeImageJob(job, body) {
+  const startedAt = Date.now();
+  Promise.resolve()
+    .then(() => analyzeImageWithQwen(body))
+    .then((analysis) => {
+      job.status = "completed";
+      job.analysis = analysis;
+      job.updatedAt = new Date().toISOString();
+      job.completedAt = job.updatedAt;
+      console.log(
+        `[AI] ${job.completedAt} async=true vision=${qwenVisionModel} classifier=${qwenClassifierModel} file="${job.fileName}" recommended=${analysis.recommended_project_id} column=${analysis.canvas_column_id} confidence=${analysis.confidence} duration=${Date.now() - startedAt}ms`
+      );
+    })
+    .catch((error) => {
+      job.status = "failed";
+      job.error = {
+        code: error.code || "AI_IMAGE_ANALYSIS_FAILED",
+        statusCode: error.statusCode || 500,
+        message: error.publicMessage || error.message || "图片识别失败，请稍后重试。"
+      };
+      job.updatedAt = new Date().toISOString();
+      job.completedAt = job.updatedAt;
+      console.error(
+        `[AI:ERROR] ${job.completedAt} async=true code=${job.error.code} status=${job.error.statusCode} duration=${Date.now() - startedAt}ms message=${job.error.message}`
+      );
+    });
+}
+
+function cleanupAiJobs() {
+  const now = Date.now();
+  for (const [jobId, job] of aiJobs.entries()) {
+    if (now - Date.parse(job.createdAt) > aiJobTtlMs) {
+      aiJobs.delete(jobId);
+    }
   }
 }
 
