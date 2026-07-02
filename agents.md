@@ -1968,6 +1968,66 @@ photoManage-cloudflare-pages.zip
 需要删除旧失败卡片后重新上传，或后续增加“重新识别”按钮。
 ```
 
+## 2026-07-02 浏览器本地缓存重新同步按钮
+
+用户反馈：
+
+```text
+公网页面看起来操作还是一样，怀疑没有更新。
+```
+
+排查结果：
+
+```text
+带登录 Cookie 访问公网 quick tunnel，确认已经返回新版本：
+  styles.css?v=20260702-async-jobs
+  app.js?v=20260702-async-jobs
+  页面包含「退出登录」
+  app.js 包含 /api/analyze-image-jobs
+
+后端 /api/state 当前没有用户截图里的「已生成图像 1 / 3」标题。
+因此这些卡片主要来自浏览器旧 localStorage 或旧页面内存状态。
+```
+
+已调整：
+
+```text
+index.html
+  顶部操作区新增「重新同步」按钮
+  资源版本更新到 20260702-resync
+
+app.js
+  新增 resyncButton
+  新增 resyncFromBackend
+  点击「重新同步」后：
+    清除浏览器 localStorage 中的 photoManage.mvp.v1
+    取消待保存的后端同步计时器
+    GET /api/state 重新拉取后端状态
+    用后端状态覆盖当前页面内存状态
+    重新写入 localStorage
+    render 并显示 toast「已重新同步后端状态」
+  如果 /api/state 返回 401，直接跳转登录页
+
+dist/
+  已同步 index.html / styles.css / app.js / _headers
+
+photoManage-cloudflare-pages.zip
+  已重新打包
+```
+
+验证结果：
+
+```text
+node --check app.js 通过
+node --check server.js 通过
+node --check dist/app.js 通过
+
+公网 quick tunnel 已返回：
+  styles.css?v=20260702-resync
+  app.js?v=20260702-resync
+  页面包含「重新同步」按钮
+```
+
 ## 2026-06-24 图片素材误显示播放器修复
 
 用户反馈：

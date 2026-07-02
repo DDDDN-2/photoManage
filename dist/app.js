@@ -178,6 +178,7 @@ const els = {
   uploadButton: document.querySelector("#uploadButton"),
   dropZone: document.querySelector("#dropZone"),
   seedButton: document.querySelector("#seedButton"),
+  resyncButton: document.querySelector("#resyncButton"),
   logoutButton: document.querySelector("#logoutButton"),
   projectForm: document.querySelector("#projectForm"),
   projectNameInput: document.querySelector("#projectNameInput"),
@@ -401,6 +402,7 @@ function bindEvents() {
     render();
   });
 
+  els.resyncButton.addEventListener("click", resyncFromBackend);
   els.logoutButton.addEventListener("click", handleLogout);
 
   els.projectForm.addEventListener("submit", (event) => {
@@ -441,6 +443,48 @@ function bindEvents() {
     closeAssetMenus();
     closeProjectMenus();
   });
+}
+
+async function resyncFromBackend() {
+  const previousLabel = els.resyncButton.textContent;
+  els.resyncButton.disabled = true;
+  els.resyncButton.textContent = "同步中";
+  backendSync.hydrating = true;
+  window.clearTimeout(backendSync.saveTimer);
+
+  try {
+    localStorage.removeItem(STORAGE_KEY);
+    const response = await fetch(`${getApiBaseUrl()}/api/state`, {
+      method: "GET",
+      cache: "no-store"
+    });
+    if (response.status === 401) {
+      redirectToLogin();
+      return;
+    }
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.message || "后端状态读取失败");
+    }
+
+    const payload = await response.json();
+    const remoteState = normalizeStoredState(payload.state);
+    Object.assign(state, remoteState || getDefaultState());
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    } catch {
+      console.warn("Remote state is larger than localStorage; using in-memory state for this session.");
+    }
+    backendSync.lastSnapshot = JSON.stringify(state);
+    render();
+    showToast("已重新同步后端状态");
+  } catch (error) {
+    showToast(error.message || "重新同步失败");
+  } finally {
+    backendSync.hydrating = false;
+    els.resyncButton.disabled = false;
+    els.resyncButton.textContent = previousLabel;
+  }
 }
 
 async function handleLogout() {
