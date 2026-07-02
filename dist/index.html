@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI 图片素材库</title>
+    <link rel="stylesheet" href="./styles.css?v=20260629-trackpad-pan" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">AI</div>
+          <div>
+            <h1>图片素材库</h1>
+            <p>自动识别 · 推荐归档</p>
+          </div>
+        </div>
+
+        <nav class="nav-list" aria-label="主导航">
+          <button class="nav-item active" data-view="library">素材库</button>
+          <button class="nav-item" data-view="queue">待确认</button>
+          <button class="nav-item" data-view="projects">项目画像</button>
+        </nav>
+
+        <section class="project-list" aria-label="项目列表">
+          <div class="section-title">项目</div>
+          <div id="projectNav"></div>
+          <form class="new-project-form" id="projectForm">
+            <label>
+              <span>新建项目</span>
+              <input id="projectNameInput" type="text" placeholder="例：童话森林" required />
+            </label>
+            <label>
+              <span>描述</span>
+              <textarea id="projectDescInput" rows="3" placeholder="这个项目主要收哪些图片"></textarea>
+            </label>
+            <label>
+              <span>关键词</span>
+              <input id="projectKeywordsInput" type="text" placeholder="逗号分隔，可选" />
+            </label>
+            <button class="sidebar-button" type="submit">新建项目</button>
+          </form>
+        </section>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">MVP Workspace</p>
+            <h2>只上传图片，归档交给 AI</h2>
+          </div>
+          <div class="top-actions">
+            <button class="ghost-button" id="seedButton" type="button">重置示例</button>
+            <button class="primary-button" id="uploadButton" type="button">上传图片</button>
+          </div>
+        </header>
+
+        <section class="metrics-grid" aria-label="概览">
+          <article class="metric">
+            <span>素材总数</span>
+            <strong id="metricAssets">0</strong>
+          </article>
+          <article class="metric">
+            <span>待确认</span>
+            <strong id="metricPending">0</strong>
+          </article>
+          <article class="metric">
+            <span>已确认</span>
+            <strong id="metricConfirmed">0</strong>
+          </article>
+          <article class="metric">
+            <span>可快速确认</span>
+            <strong id="metricQuickConfirm">0</strong>
+          </article>
+        </section>
+
+        <section class="upload-panel">
+          <input id="fileInput" type="file" accept="image/*,audio/*,video/*" multiple hidden />
+          <div class="drop-zone" id="dropZone" tabindex="0" role="button" aria-label="上传图片、声音或视频素材">
+            <div class="upload-icon">+</div>
+            <div>
+              <strong>拖入图片 / 声音 / 视频或点击上传</strong>
+              <p>图片自动识别归档；声音进入音色列，视频进入输出结果列。</p>
+            </div>
+          </div>
+          <div class="review-panel">
+            <div class="review-panel-head">
+              <strong>归档任务</strong>
+              <span>点击筛选</span>
+            </div>
+            <button class="task-row" type="button" data-task-status="recommended">
+              <span>可快速确认</span>
+              <strong id="reviewRecommended">0</strong>
+            </button>
+            <button class="task-row" type="button" data-task-status="possible">
+              <span>需要判断</span>
+              <strong id="reviewPossible">0</strong>
+            </button>
+            <button class="task-row" type="button" data-task-status="pending">
+              <span>待人工确认</span>
+              <strong id="reviewPending">0</strong>
+            </button>
+            <button class="task-row" type="button" data-task-status="processing">
+              <span>正在处理</span>
+              <strong id="reviewProcessing">0</strong>
+            </button>
+          </div>
+        </section>
+
+        <section class="tool-row">
+          <label class="search-box">
+            <span>搜索</span>
+            <input id="searchInput" type="search" placeholder="例：圆润 3D 道具、赛博城市、古风角色" />
+          </label>
+          <label class="select-box">
+            <span>项目</span>
+            <select id="projectFilter"></select>
+          </label>
+          <label class="select-box">
+            <span>状态</span>
+            <select id="statusFilter">
+              <option value="all">全部</option>
+              <option value="pending">待确认</option>
+              <option value="recommended">待快速确认</option>
+              <option value="possible">可能相关</option>
+              <option value="confirmed">已确认</option>
+              <option value="processing">处理中</option>
+            </select>
+          </label>
+        </section>
+
+        <section class="content-grid">
+          <div class="asset-area">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow" id="viewEyebrow">Library</p>
+                <h3 id="viewTitle">素材推荐</h3>
+              </div>
+              <button class="ghost-button compact" id="clearSearch" type="button">清空筛选</button>
+            </div>
+            <div class="asset-grid" id="assetGrid"></div>
+            <section class="canvas-area" id="canvasArea" hidden>
+              <div class="canvas-toolbar">
+                <div class="canvas-title-block">
+                  <strong id="canvasProjectName">项目画布</strong>
+                  <span id="canvasStats">0 张素材</span>
+                </div>
+                <div class="canvas-actions">
+                  <button class="ghost-button compact" id="canvasZoomOut" type="button">-</button>
+                  <span class="zoom-readout" id="canvasZoomReadout">100%</span>
+                  <button class="ghost-button compact" id="canvasZoomIn" type="button">+</button>
+                  <button class="ghost-button compact" id="fitCanvasButton" type="button">适配视图</button>
+                  <button class="ghost-button compact" id="tidyCanvasButton" type="button">整理素材</button>
+                  <button class="ghost-button compact" id="addGroupButton" type="button">新建分组</button>
+                  <button class="ghost-button compact" id="addNoteButton" type="button">便签</button>
+                  <button class="ghost-button compact" id="resetCanvasButton" type="button">重置布局</button>
+                </div>
+              </div>
+              <div class="canvas-help">双指滑动或拖动画布空白处平移，点击 +/- 或双击空白处缩放；把图片、声音和视频拖进不同列，卡片会自动避让。</div>
+              <div class="canvas-viewport" id="canvasViewport">
+                <div class="canvas-world" id="canvasWorld"></div>
+                <button class="canvas-minimap" id="canvasMinimap" type="button" aria-label="画布小地图"></button>
+              </div>
+            </section>
+            <div class="empty-state" id="emptyState" hidden>
+              <strong>没有匹配素材</strong>
+              <p>换个搜索词，或上传几张图片让 AI 先建立素材索引。</p>
+            </div>
+          </div>
+
+          <aside class="inspector">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">Project Profile</p>
+                <h3 id="profileName">项目画像</h3>
+              </div>
+            </div>
+            <p id="profileDescription" class="profile-copy"></p>
+            <div class="profile-block">
+              <span>关键词</span>
+              <div id="profileTags" class="tag-list"></div>
+            </div>
+            <div class="profile-block">
+              <span>推荐依据</span>
+              <ul id="profileSignals" class="signal-list"></ul>
+            </div>
+            <div class="profile-block">
+              <span>反馈记录</span>
+              <div id="feedbackList" class="feedback-list"></div>
+            </div>
+          </aside>
+        </section>
+      </main>
+    </div>
+
+    <template id="assetCardTemplate">
+      <article class="asset-card">
+        <div class="thumb-wrap">
+          <img class="thumb" alt="" />
+          <audio class="asset-audio" controls hidden></audio>
+          <video class="asset-video" controls hidden></video>
+          <span class="status-pill"></span>
+          <div class="card-menu-wrap">
+            <button class="menu-trigger" type="button" aria-label="更多操作" aria-expanded="false">...</button>
+            <div class="card-menu" hidden>
+              <button class="edit-asset-button" type="button">修改</button>
+              <button class="delete-asset-button danger" type="button">删除</button>
+            </div>
+          </div>
+        </div>
+        <div class="asset-body">
+          <div class="asset-title-row">
+            <h4></h4>
+            <span class="score"></span>
+          </div>
+          <p class="asset-description"></p>
+          <div class="tag-list"></div>
+          <div class="recommend-box">
+            <span class="recommend-project"></span>
+            <p class="recommend-reason"></p>
+          </div>
+          <p class="inline-feedback" hidden></p>
+          <div class="card-actions">
+            <select class="project-select" aria-label="选择归档项目"></select>
+            <button class="confirm-button" type="button">确认</button>
+            <button class="ghost-button reject-button" type="button">待确认</button>
+            <button class="ghost-button copy-image-button" type="button">复制图片</button>
+            <button class="ghost-button similar-button" type="button">相似</button>
+          </div>
+        </div>
+      </article>
+    </template>
+
+    <template id="canvasAssetTemplate">
+      <article class="canvas-asset-card">
+        <button class="canvas-delete-asset" type="button" aria-label="删除素材">×</button>
+        <img class="canvas-asset-image" alt="" />
+        <audio class="canvas-asset-audio" controls hidden></audio>
+        <video class="canvas-asset-video" controls hidden></video>
+        <div class="canvas-asset-meta">
+          <strong></strong>
+          <span></span>
+        </div>
+        <div class="canvas-asset-tools">
+          <button class="copy-canvas-asset" type="button">复制</button>
+          <button class="pending-canvas-asset" type="button">待确认</button>
+        </div>
+      </article>
+    </template>
+
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+    <script src="./app.js?v=20260629-trackpad-pan" type="module"></script>
+  </body>
+</html>

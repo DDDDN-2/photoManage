@@ -1,0 +1,9 @@
+{
+  "name": "photo-manage-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI image asset library web MVP",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

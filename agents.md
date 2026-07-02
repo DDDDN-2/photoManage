@@ -1,0 +1,2112 @@
+# AI 图片素材库长期版方案
+
+## 产品目标
+
+用户只负责上传图片。系统自动完成：
+
+- 自动生成图片名称、描述、标签
+- 自动识别图片主体、场景、风格、角色、用途
+- 自动推荐归档项目，比如「噜噜嘟嘟」「赛博短片」「古风短剧」
+- 支持自然语言搜索和相似图片搜索
+- 低置信度素材进入「待确认项目」，用户确认后反哺项目画像
+
+核心原则：不要求用户整理素材，只让用户确认 AI 的推荐是否正确。
+
+## 推荐技术架构
+
+```text
+前端
+  Web App: Next.js / React
+  后续可扩展移动端、桌面端
+
+后端
+  API: FastAPI / NestJS
+  Auth: Supabase Auth / Clerk / 自建 JWT
+  Queue: Redis + BullMQ / Celery
+
+数据层
+  PostgreSQL: 用户、项目、素材、标签、任务状态
+  Object Storage: S3 / Cloudflare R2 / 阿里云 OSS
+  Vector DB: pgvector 起步，后期可换 Qdrant / Milvus
+
+AI 层
+  多模态识别 API: 图片理解、描述、标签、推荐理由
+  Embedding API: 图片向量、文本向量、项目画像向量
+```
+
+## 上传处理流程
+
+```text
+用户上传图片
+  -> 原图存对象存储
+  -> 数据库创建 asset 记录
+  -> 创建后台任务
+  -> AI 识别图片内容
+  -> 生成 title / description / tags
+  -> 生成图片 embedding
+  -> 和所有项目画像 embedding 比较
+  -> 推荐项目 + 置信度 + 理由
+  -> 写入数据库
+  -> 前端显示结果
+```
+
+## 项目推荐逻辑
+
+每个项目维护一个「项目画像」，由已确认素材自动生成：
+
+```text
+项目画像 =
+  已确认图片向量的聚合
+  + 项目关键词
+  + 角色参考图
+  + 场景参考图
+  + 用户确认/纠错记录
+```
+
+推荐分数可以这样组合：
+
+```text
+final_score =
+  图片向量相似度 * 0.55
+  + AI 文本标签匹配 * 0.25
+  + 文件名/上传来源线索 * 0.10
+  + 用户历史确认偏好 * 0.10
+```
+
+推荐规则：
+
+- `>= 0.85`：自动推荐到项目，等待用户快速确认
+- `0.65 - 0.85`：推荐但标记为「可能相关」
+- `< 0.65`：进入「待确认项目」
+
+## 数据库核心表
+
+```sql
+users
+- id
+- email
+- created_at
+
+projects
+- id
+- user_id
+- name
+- description
+- profile_text
+- profile_embedding
+- created_at
+- updated_at
+
+assets
+- id
+- user_id
+- project_id
+- recommended_project_id
+- recommendation_score
+- recommendation_reason
+- file_url
+- thumbnail_url
+- title
+- description
+- status
+- created_at
+
+asset_tags
+- id
+- asset_id
+- tag
+- source -- ai / user
+
+asset_embeddings
+- asset_id
+- embedding
+- model
+
+ai_jobs
+- id
+- asset_id
+- type
+- status
+- error
+- created_at
+- completed_at
+
+project_feedback
+- id
+- asset_id
+- suggested_project_id
+- final_project_id
+- action -- accepted / changed / rejected
+- created_at
+```
+
+## API 设计
+
+```text
+POST /assets/upload
+上传图片，返回 asset_id 和处理状态
+
+GET /assets
+按项目、标签、搜索词、状态筛选素材
+
+GET /assets/:id
+获取单张素材详情
+
+POST /assets/:id/confirm-project
+确认或修改 AI 推荐项目
+
+POST /search
+自然语言搜索素材
+
+POST /projects
+创建项目
+
+GET /projects/:id/profile
+查看项目画像和推荐依据
+```
+
+## AI 输出格式
+
+多模态识别 API 应返回结构化 JSON：
+
+```json
+{
+  "title": "噜噜同IP小床",
+  "description": "圆润3D体块、低饱和橙黄色、儿童向IP气质明显",
+  "tags": ["噜噜嘟嘟", "同IP道具", "圆润线条", "3D软胶"],
+  "visual_features": {
+    "subject": "儿童向小床道具",
+    "colors": ["橙黄", "奶白", "浅绿"],
+    "style": "圆润3D软胶",
+    "usage": "角色场景道具"
+  },
+  "recommended_project": "噜噜嘟嘟",
+  "confidence": 0.92,
+  "reason": "与噜噜嘟嘟项目已确认素材在配色、圆润比例和3D软胶质感上接近"
+}
+```
+
+## 开发阶段
+
+第一阶段：可用 MVP
+
+- 用户登录
+- 项目管理
+- 图片上传
+- 后台 AI 识别任务
+- 自动标题、描述、标签
+- 推荐项目
+- 待确认项目
+- 基础搜索
+
+第二阶段：真正好用
+
+- 向量搜索
+- 相似图片
+- 项目画像自动更新
+- 用户确认/纠错反馈
+- 批量上传
+- 批量确认项目
+
+第三阶段：长期资产库
+
+- 多端同步
+- 团队协作
+- 分享链接
+- 权限控制
+- 版本历史
+- 项目素材包导出
+
+## 推荐起步方案
+
+如果先做一个稳定但不复杂的版本：
+
+```text
+Next.js
+PostgreSQL + pgvector
+Cloudflare R2
+Redis + BullMQ
+一个多模态识别 API
+一个 embedding API
+```
+
+起步时不需要单独部署 Qdrant/Milvus。图片量上来后，再把向量检索从 pgvector 迁移出去。
+
+## 部署与域名/IP
+
+开发 Web 端不需要先申请 IP。
+
+本地开发：
+
+```text
+localhost:3000
+```
+
+适合开发上传、搜索、登录、项目推荐等功能。不要长期用 `file://` 打开页面，因为浏览器会限制剪贴板、上传、跨域请求等能力。
+
+前端测试部署：
+
+```text
+Cloudflare Pages
+```
+
+Cloudflare Pages 可以免费托管前端页面，适合部署 Next.js/React 的 Web 端测试版。它会自动提供一个 HTTPS 访问地址，例如：
+
+```text
+https://your-app.pages.dev
+```
+
+优点：
+
+- 免费额度适合早期项目
+- 自动 HTTPS
+- 不需要自己申请公网 IP
+- 适合部署静态前端或轻量前端
+- 后续可以绑定自己的域名
+
+注意：
+
+- Cloudflare Pages 主要负责前端
+- 图片原文件建议放 Cloudflare R2 / S3 / 阿里云 OSS
+- 数据库、队列、AI worker 通常需要单独部署
+- 如果用 Next.js 的纯静态导出，Pages 很合适
+- 如果大量依赖服务端渲染或长时间后台任务，需要配合独立 API/worker 服务
+
+推荐部署组合：
+
+```text
+前端：Cloudflare Pages
+图片存储：Cloudflare R2
+后端 API：Railway / Render / Fly.io / 云服务器
+数据库：Supabase Postgres / Neon / 自建 PostgreSQL
+队列：Upstash Redis / 云 Redis / 自建 Redis
+AI Worker：和 API 同部署，或单独 worker 服务
+```
+
+正式上线：
+
+```text
+自定义域名
+HTTPS
+对象存储
+数据库备份
+日志与监控
+权限系统
+```
+
+如果服务器和域名解析用于中国大陆正式访问，通常需要考虑 ICP 备案。若部署在 Cloudflare Pages、香港、新加坡、日本、美国等境外服务，一般不需要大陆 ICP 备案，但国内访问速度和稳定性需要测试。
+
+## 2026-06-17 开发上下文压缩
+
+已根据本方案落地一个网页端 MVP，当前项目不依赖 npm 包，使用纯静态前端加 Node 静态服务，方便本地运行和 Cloudflare Pages 部署。
+
+新增文件：
+
+```text
+index.html    页面结构：侧边项目、上传区、筛选区、素材卡片、项目画像侧栏
+styles.css    工作台式响应式界面样式
+app.js        前端状态、上传模拟 AI 识别、推荐项目、确认反馈、搜索和相似筛选
+server.js     静态文件服务，默认监听 0.0.0.0:3000，支持局域网访问
+README.md     启动、外网访问、Cloudflare Pages 部署和后端集成说明
+package.json  仅包含 start 脚本，无第三方依赖
+```
+
+当前可运行能力：
+
+- 多图拖拽上传和点击上传
+- 上传后模拟后台 AI 识别任务
+- 自动生成标题、描述、标签、推荐项目、置信度和推荐理由
+- 按 `>=0.85`、`0.65-0.85`、`<0.65` 映射到待快速确认、可能相关、待确认
+- 用户确认项目、改归档项目、移入待确认项目
+- 支持在左侧新建项目，填写项目名、描述、关键词后自动生成基础项目画像
+- 搜索标题、描述、标签、项目名和推荐理由
+- 基于标签和推荐项目的一键相似素材筛选
+- 项目画像侧栏和用户反馈记录
+- 使用 `localStorage` 保存前端数据
+
+启动方式：
+
+```bash
+node server.js
+```
+
+默认访问：
+
+```text
+http://localhost:3000
+http://本机局域网IP:3000
+```
+
+公网访问建议：
+
+```text
+Cloudflare Pages
+Build command: 留空
+Build output directory: .
+```
+
+接真实后端时优先替换 `app.js` 中的这些边界：
+
+```text
+handleFiles -> POST /assets/upload
+getVisibleAssets/renderAssets -> GET /assets 或 POST /search
+confirmAsset -> POST /assets/:id/confirm-project
+renderProfile -> GET /projects/:id/profile
+createProject -> POST /projects
+```
+
+## 2026-06-17 项目管理补充
+
+用户反馈无法新建项目，已补齐项目创建能力。
+
+实现要点：
+
+```text
+index.html
+  左侧项目区域新增新建项目表单：项目名、描述、关键词
+
+styles.css
+  新增侧栏表单、输入框、按钮和滚动样式
+
+app.js
+  defaultProjects 保留内置示例项目
+  state.projects 持久化项目列表
+  normalizeProjects 兼容旧 localStorage 数据
+  createProject 新建项目并生成基础画像
+  renderProjectControls / renderAssets / renderProfile 全部改用动态项目列表
+  analyzeFile 支持按自定义项目名和关键词进行初步匹配
+```
+
+验证结果：
+
+```text
+node --check app.js 通过
+node --check server.js 通过
+curl http://localhost:3000 返回 200
+浏览器实测新建「测试项目A」后：
+  左侧项目列表出现新项目
+  项目筛选下拉出现新项目
+  右侧项目画像切换到新项目
+  反馈记录写入新建项目事件
+```
+
+## 2026-06-17 确认交互补充
+
+用户反馈确认按钮点击后缺少反馈，且已确认素材仍显示确认按钮。
+
+已调整：
+
+```text
+index.html
+  素材卡片新增 inline-feedback
+  页面新增 toast 状态提示
+
+app.js
+  项目选择下拉新增「请选择项目」空选项
+  确认前校验项目不能为空，且不能确认到「待确认项目」
+  已确认素材隐藏「确认」和「待确认」按钮
+  已确认素材禁用项目下拉并显示「已归档到...」
+  confirm / moveToPending / createProject 后显示 toast 反馈
+
+styles.css
+  新增 inline-feedback、toast、invalid select 样式
+```
+
+验证结果：
+
+```text
+node --check app.js 通过
+node --check server.js 通过
+浏览器快照确认：
+  未确认素材下拉包含「请选择项目」
+  已确认素材显示「已归档到...」
+  已确认素材不再显示「确认」和「待确认」按钮
+```
+
+## 2026-06-17 素材菜单补充
+
+用户建议素材卡片右上角增加三个点按钮，并在下拉框中提供修改、删除。
+
+已调整：
+
+```text
+index.html
+  thumb-wrap 右上角新增 menu-trigger
+  新增 card-menu，包含「修改」「删除」
+
+app.js
+  新增 editingAssetIds 保存当前编辑态素材
+  点击「修改」后已确认素材重新显示项目下拉和「保存」按钮
+  保存成功后退出编辑态，并继续复用非空项目校验
+  点击「删除」会弹出确认框，确认后从 state.assets 移除并写入反馈
+  点击卡片外部会关闭已打开菜单
+
+styles.css
+  新增三点按钮、菜单浮层、危险删除项样式
+```
+
+验证结果：
+
+```text
+node --check app.js 通过
+node --check server.js 通过
+浏览器实测：
+  每张素材卡片都有三个点菜单
+  菜单打开后显示「修改」「删除」
+  已确认卡片默认没有确认按钮
+  点击「修改」后出现「保存」按钮和编辑提示
+```
+
+## 2026-06-17 概览指标调整
+
+用户指出「平均置信度」和上传区右侧的「对象存储 / AI 识别 / 向量匹配 / 推荐项目」对最终用户没有明显价值。
+
+已调整：
+
+```text
+index.html
+  顶部第四个指标从「平均置信度」改为「可快速确认」
+  上传区右侧从工程流程改为「归档任务」
+  归档任务包含：可快速确认、需要判断、待人工确认、正在处理
+
+app.js
+  renderMetrics 改为统计各状态数量
+  新增 countAssetsByStatus
+  点击归档任务项会设置状态筛选并切回素材库
+
+styles.css
+  移除 pipeline 样式
+  新增 review-panel / task-row 样式
+```
+
+验证结果：
+
+```text
+node --check app.js 通过
+node --check server.js 通过
+浏览器实测：
+  页面不再出现「平均置信度」
+  页面不再出现工程流程文案
+  点击「需要判断」后状态筛选切到 possible，列表标题显示「可能相关」
+```
+
+## 2026-06-17 外网访问与复制图片补充
+
+用户要求通过 Cloudflare 实现外网访问，并新增可以复制图片的按钮，便于快速粘贴到即梦 AI 网页端。
+
+已调整：
+
+```text
+index.html
+  素材卡片操作区新增「复制图片」按钮
+
+app.js
+  新增 copyAssetImage
+  新增 imageSourceToPngBlob
+  复制时优先使用 ClipboardItem 写入 image/png
+  浏览器不支持图片剪贴板时，降级复制图片数据链接
+  复制成功/失败均显示 toast
+
+_headers
+  新增 Cloudflare Pages headers
+  Cache-Control: no-store
+  Permissions-Policy: clipboard-write=(self)
+
+dist/
+  新增 Cloudflare Pages 干净发布目录
+  只包含 index.html、styles.css、app.js、_headers
+
+photoManage-cloudflare-pages.zip
+  新增可上传到 Cloudflare Pages 的干净压缩包
+```
+
+验证结果：
+
+```text
+node --check app.js 通过
+node --check server.js 通过
+curl http://localhost:3000/index.html 可看到复制按钮
+浏览器实测每张素材卡片出现「复制图片」按钮
+zip 包检查只包含 4 个公网文件
+```
+
+Cloudflare 状态：
+
+```text
+本机没有 wrangler / cloudflared / npm
+尝试从 GitHub 下载 cloudflared，多次断流失败
+Chrome 已安装，Codex Chrome Extension 已安装并启用
+Chrome 当前未运行；需要用户允许打开 Chrome 后，才能继续用 Cloudflare Dashboard 操作 Pages 上传发布
+```
+
+## 2026-06-18 项目内部自由画布第一版
+
+用户确认：项目体系和主页不改变，但项目内部通过自由画布构建。
+
+已调整：
+
+```text
+index.html
+  在素材区域新增 canvasArea
+  新增 canvasToolbar：缩放、新建分组、便签、重置布局
+  新增 canvasViewport / canvasWorld
+  新增 canvasAssetTemplate
+
+app.js
+  新增 activeView = canvas 的项目内部视图
+  点击左侧具体项目进入项目画布
+  点击全部素材或素材库回到主页素材列表
+  state.canvasLayouts 持久化每个项目的画布布局
+  默认画布包含：角色参考、场景 / 道具、风格参考、说明便签
+  项目相关素材会以可拖拽卡片形式出现在画布中
+  支持画布空白处拖动平移
+  支持按钮点击缩放，后续移除滚轮缩放以避免误触
+  支持拖动素材、分组、便签
+  支持新建 / 删除分组
+  支持新建 / 删除便签
+  支持双击分组名改名
+  支持重置当前项目画布布局
+  进入 canvas 视图时隐藏主页概览、上传和筛选条，让画布成为项目首屏
+
+styles.css
+  新增项目画布、工具栏、网格背景、素材节点、分组、便签样式
+  新增 body[data-view="canvas"] 规则隐藏主页组件
+
+dist/
+  已同步到自由画布版本
+
+photoManage-cloudflare-pages.zip
+  已重新打包自由画布版本
+```
+
+验证结果：
+
+```text
+node --check app.js 通过
+node --check server.js 通过
+浏览器实测：
+  点击「赛博短片」进入 canvas 视图
+  素材列表隐藏，项目画布显示
+  画布内有素材卡片、3 个默认分组、1 个便签
+  拖拽素材卡片后 DOM 位置变化，拖拽结束会 saveState
+  canvas 视图中主页概览 / 上传 / 筛选条均隐藏
+```
+
+## 2026-06-18 画布视图去除右侧栏
+
+用户指出项目画布右侧的 Project Profile 不必要，会占用画布空间。
+
+已调整：
+
+```text
+styles.css
+  body[data-view="canvas"] .content-grid 改为单列
+  body[data-view="canvas"] .inspector 设置 display: none
+
+行为
+  素材库 / 待确认 / 普通列表视图仍保留右侧项目画像
+  进入具体项目画布后隐藏右侧画像，画布铺满主内容区
+```
+
+验证结果：
+
+```text
+浏览器实测：
+  点击「噜噜嘟嘟」进入 canvas
+  inspectorDisplay = none
+  contentColumns = 单列
+  canvasWidth 接近 workspaceWidth
+```
+
+## 2026-06-18 自由画布增强
+
+用户要求继续完善自由画布。
+
+已调整：
+
+```text
+index.html
+  画布工具栏新增「适配视图」
+  画布工具栏新增「整理素材」
+  canvasViewport 内新增 canvasMinimap 小地图
+  canvasAssetTemplate 内新增素材快捷按钮：复制、待确认
+
+app.js
+  新增 fitCanvasToContent：根据素材 / 分组 / 便签边界自动缩放和平移到视图内
+  新增 tidyCanvasAssets：按网格重新整理当前项目素材
+  新增 renderCanvasMinimap：显示分组、素材点和当前视口
+  新增 handleMinimapClick：点击小地图移动视角
+  新增 startCanvasGroupResize：拖动分组右下角调整尺寸
+  画布内素材卡可直接复制图片
+  画布内素材卡可直接移入待确认
+
+styles.css
+  新增 canvas-resize-handle
+  新增 canvas-asset-tools
+  新增 canvas-minimap / minimap-box / minimap-dot / minimap-view
+```
+
+验证结果：
+
+```text
+node --check app.js 通过
+node --check server.js 通过
+浏览器实测：
+  进入「赛博短片」项目画布
+  适配视图 / 整理素材按钮存在并可点击
+  小地图渲染分组、素材点和视口框
+  素材卡内出现复制 / 待确认快捷按钮
+  拖动分组右下角，分组宽高发生变化
+  dist/ 和 photoManage-cloudflare-pages.zip 已同步
+```
+
+## 2026-06-18 Cloudflare 发布完成
+
+用户允许打开 Chrome 后，通过 Cloudflare Dashboard 完成静态文件上传部署。
+
+发布信息：
+
+```text
+Cloudflare 应用名称：photo-manage
+公网地址：https://photo-manage.dn2king666.workers.dev/
+部署方式：Cloudflare Dashboard -> Workers 和 Pages -> Upload your static files
+上传目录：dist/
+上传文件：
+  _headers
+  app.js
+  index.html
+  styles.css
+```
+
+验证结果：
+
+```text
+Chrome 成功打开公网地址
+页面标题为「AI 图片素材库」
+素材卡片正常渲染
+「复制图片」按钮存在
+点击「复制图片」后显示 toast：「图片已复制，可以粘贴到即梦 AI」
+终端 curl 在当前网络下访问 workers.dev 超时，但 Chrome 实测公网页面可用
+```
+
+## 2026-06-18 自由画布交互收敛
+
+用户反馈：
+
+```text
+画布滚轮缩放有点难用，需要去掉，改成鼠标点击缩放。
+画布下方的「没有匹配素材」区域对项目内部画布没用，需要隐藏。
+继续聚焦把自由画布做好。
+```
+
+已调整：
+
+```text
+index.html
+  画布提示文案改为：点击 +/- 或双击空白处缩放
+
+app.js
+  移除 canvasViewport 的 wheel 缩放监听
+  删除 handleCanvasWheel
+  新增 handleCanvasDoubleClick，双击画布空白处放大
+  保留工具栏 +/- 作为主要鼠标点击缩放入口
+
+styles.css
+  新增 .empty-state[hidden] { display: none; }
+  修复 canvas 模式下 hidden 被 .empty-state 的 display:grid 覆盖的问题
+```
+
+产品结论：
+
+```text
+项目内部画布不再展示素材列表空状态。
+滚轮只保留页面原生滚动行为，不再承担画布缩放。
+画布缩放入口集中到按钮点击和空白处双击。
+```
+
+## 2026-06-18 项目内连续上传修复
+
+用户反馈：
+
+```text
+在项目内部上传第二张图片就没反应了。
+```
+
+问题判断：
+
+```text
+项目画布模式下，上传入口仍可点击，但 handleFiles 新建的处理中素材默认 recommendedProjectId = unassigned。
+如果文件名没有命中当前项目关键词，AI 模拟识别完成后也可能继续留在待确认项目。
+结果是在具体项目画布内上传时，新增素材不会稳定出现在当前画布，用户会感觉第二张或后续上传没有反应。
+```
+
+已调整：
+
+```text
+app.js
+  新增 getActiveUploadProjectId
+  handleFiles 在上传入口捕获当前项目画布 ID
+  项目内上传的处理中素材立即挂到当前项目 recommendedProjectId
+  项目内上传的处理中描述和推荐理由改为当前项目语境
+  analyzeFile 新增 preferredProjectId 参数
+  项目内上传优先沿用当前项目作为推荐项目，避免识别后跳到待确认或其他项目导致画布消失
+  renderCanvas 中上传按钮文案改为「上传到项目名」
+  renderAssets 中上传按钮文案恢复为「上传图片」
+
+dist/
+  已同步 app.js
+
+photoManage-cloudflare-pages.zip
+  已重新打包，包含 index.html / styles.css / app.js / _headers
+```
+
+验证结果：
+
+```text
+node --check app.js 通过
+node --check server.js 通过
+node --check dist/app.js 通过
+本地服务 PORT=3001 node server.js 可启动
+浏览器确认：
+  进入「噜噜嘟嘟」后 body[data-view] = canvas
+  项目画布标题显示「噜噜嘟嘟画布」
+  顶部上传按钮显示「上传到噜噜嘟嘟」
+说明：
+  当前 in-app browser 测试环境只暴露 DOM 读能力，无法构造 File / Blob / DataTransfer 做真实文件输入自动化。
+  文件上传修复已通过代码路径和语法检查确认，真实浏览器手动上传应表现为连续上传的素材都留在当前项目画布。
+```
+
+## 2026-06-18 列式关系画布第一版
+
+用户方向：
+
+```text
+希望项目内部自由画布参考关系板形态，不再以大框为主。
+素材应该放在每列当中，方便构建角色、状态、场景、视频之间的关系。
+```
+
+产品判断：
+
+```text
+长期更适合采用「列式关系画布」。
+当前大框方案更像归类文件夹，适合 MVP 早期粗分组，但不利于表达素材之间的横向关系。
+列式画布更适合 AI 视频创作工作流：
+  参考素材 -> 角色 / 状态 -> 场景 / 镜头 -> 输出结果
+```
+
+已调整：
+
+```text
+app.js
+  CANVAS_LAYOUT_VERSION 升级到 3
+  新增 CANVAS_COLUMNS，默认 4 列：
+    参考素材
+    角色 / 状态
+    场景 / 镜头
+    输出结果
+  新建画布默认不再创建「角色参考 / 场景道具 / 风格参考」三个大分组框
+  旧布局升级时会清理这三个默认分组框
+  保留用户手动点击「新建分组」创建临时小组的能力
+  renderCanvas 新增列背景渲染
+  ensureCanvasAssetPositions 改为按列给素材初始位置
+  inferCanvasColumnId 根据标题、描述、标签、推荐理由推断素材应该进入哪一列
+  tidyCanvasAssets 改为按列纵向整理素材
+  拖动素材时会根据横向位置更新 columnId，形成轻量吸附
+  getCanvasContentBounds 和 renderCanvasMinimap 支持列式画布
+
+index.html
+  画布帮助文案改为强调把素材拖进不同列，建立关系
+
+styles.css
+  新增 canvas-column / canvas-column-head 样式
+  列是淡色泳道，不再像大框一样强约束素材
+  素材卡根据 columnId 有轻微边框差异
+  小地图新增 minimap-column
+
+dist/
+  已同步 index.html / styles.css / app.js / _headers
+
+photoManage-cloudflare-pages.zip
+  已重新打包，包含 4 个公网文件
+```
+
+验证结果：
+
+```text
+node --check app.js 通过
+node --check server.js 通过
+node --check dist/app.js 通过
+浏览器实测：
+  重置示例后进入「噜噜嘟嘟」项目
+  body[data-view] = canvas
+  画布渲染 4 个列区：
+    参考素材
+    角色 / 状态
+    场景 / 镜头
+    输出结果
+  默认大分组框数量为 0
+  示例「噜噜同 IP 小床」进入 source / 参考素材列
+  画布帮助文案已更新为列式关系说明
+```
+
+## 2026-06-18 列式画布顶部重叠修复
+
+用户反馈：
+
+```text
+画布顶部说明、列标题、素材 / 分组视觉上重叠到一起。
+```
+
+已调整：
+
+```text
+app.js
+  CANVAS_LAYOUT_VERSION 升级到 4
+  CANVAS_COLUMNS 的 y 从 44 下移到 96
+  列高度从 1380 调整为 1320
+  新素材和整理素材的起始 y 改为 column.y + 102
+  旧布局升级时：
+    顶部过近的 group 自动下移到 y >= 210
+    顶部过近的 note 自动下移到 y >= 150
+    顶部过近的 asset 自动下移到 y >= 182
+  新建分组默认也限制在 y >= 210，避免贴住列头
+
+styles.css
+  canvas-help 改成独立提示条，增加 padding、border、背景和行高
+  canvas-column-head 背景加深，和画布网格、提示条拉开层次
+
+dist/
+  已同步 index.html / styles.css / app.js / _headers
+
+photoManage-cloudflare-pages.zip
+  已重新打包
+```
+
+验证结果：
+
+```text
+node --check app.js 通过
+node --check server.js 通过
+node --check dist/app.js 通过
+dist matches source
+浏览器实测：
+  进入「噜噜嘟嘟」项目画布
+  helpBottom = 265
+  viewportTop = 275
+  columnTop = 372
+  cardTop = 474
+  顶部提示条、列标题和素材卡不再重叠
+```
+
+## 2026-06-18 画布素材悬停删除
+
+用户建议：
+
+```text
+在项目画布页面删除素材时，鼠标放在图片上，右上角出现 X 按钮。
+```
+
+已调整：
+
+```text
+index.html
+  canvasAssetTemplate 新增 canvas-delete-asset 按钮
+  按钮 aria-label 为「删除素材」
+
+app.js
+  renderCanvas 为 canvas-delete-asset 绑定点击事件
+  点击 X 会 stopPropagation，避免触发拖拽
+  点击 X 后复用 deleteAsset(asset.id)
+  deleteAsset 删除素材时同步清理所有 canvasLayouts 中对应 asset 的 items 位置记录
+
+styles.css
+  新增 canvas-delete-asset 样式
+  删除按钮定位在素材卡右上角
+  默认 opacity = 0
+  .canvas-asset-card:hover / :focus-within 时显示
+  处理中素材禁用删除按钮
+
+dist/
+  已同步 index.html / styles.css / app.js / _headers
+
+photoManage-cloudflare-pages.zip
+  已重新打包
+```
+
+验证结果：
+
+```text
+node --check app.js 通过
+node --check server.js 通过
+node --check dist/app.js 通过
+dist matches source
+浏览器确认：
+  项目画布素材卡内存在 canvas-delete-asset 按钮
+  aria-label = 删除素材
+  默认 opacity = 0
+  hover CSS 规则存在
+```
+
+## 2026-06-18 处理中素材允许删除
+
+用户反馈：
+
+```text
+项目画布里 AI 识别中的素材右上角 X 出现了，但不让删。
+```
+
+已调整：
+
+```text
+app.js
+  移除 canvas-delete-asset 在 processing 状态下的 disabled 逻辑
+  处理中素材也可以点击 X 删除
+
+styles.css
+  移除 canvas-delete-asset:disabled 样式，避免出现看得到但不能点的状态
+
+dist/
+  已同步 index.html / styles.css / app.js / _headers
+
+photoManage-cloudflare-pages.zip
+  已重新打包
+```
+
+验证结果：
+
+```text
+node --check app.js 通过
+node --check server.js 通过
+node --check dist/app.js 通过
+dist matches source
+```
+
+## 2026-06-23 Qwen 视觉调用成功与日志补充
+
+用户询问：
+
+```text
+目前视觉模型 API 调用是否成功，是否可以查看日志。
+```
+
+验证结果：
+
+```text
+.env 已配置 DASHSCOPE_API_KEY
+当前模型：
+  qwen-vl-plus
+
+第一次用 1x1 PNG 测试：
+  请求已到达 Qwen API
+  返回 400
+  原因：图片宽高必须大于 10
+
+第二次用 32x32 PNG 测试：
+  POST /api/analyze-image 返回 200
+  返回 title / recommended_project_id / confidence
+  示例：
+    title = 彩色方块测试图
+    recommended = unassigned
+    confidence = 0.6
+```
+
+已调整：
+
+```text
+server.js
+  handleAnalyzeImage 增加成功日志
+  成功格式：
+    [AI] 时间 model=模型名 file="文件名" recommended=项目 confidence=置信度 duration=耗时ms
+  失败格式：
+    [AI:ERROR] 时间 code=错误码 status=状态码 duration=耗时ms message=错误信息
+  日志不打印 DASHSCOPE_API_KEY
+```
+
+终端日志示例：
+
+```text
+[AI] 2026-06-23T02:06:43.133Z model=qwen-vl-plus file="log-test-color-block.png" recommended=unassigned confidence=0.6 duration=2302ms
+```
+
+验证命令：
+
+```text
+node --check server.js 通过
+node --check app.js 通过
+本地服务已重启到 http://localhost:3000
+```
+
+## 2026-06-23 画布输出列误判修复
+
+用户反馈：
+
+```text
+识别完后还是没有到特定的列内。
+示例：可爱旋转木马场景被放到「输出结果」，应进入「场景 / 镜头」。
+```
+
+问题判断：
+
+```text
+上一版前端优先相信 Qwen 返回的 canvas_column_id。
+如果模型把静态 AI 生成图、场景图误判为 output，前端会直接放入「输出结果」。
+但产品定义中 output 应只用于视频、成片、最终输出。
+```
+
+已调整：
+
+```text
+server.js
+  Qwen prompt 增加约束：
+    静态图片、AI 生成图、参考图、场景图即使是“生成出来的图片”，也不要放 output
+    只有视频 / 成片 / 最终交付结果才放 output
+
+app.js
+  inferCanvasColumnId 不再无条件相信 canvasColumnId=output
+  output 只匹配强信号：
+    视频 / 成片 / 最终输出 / 输出结果 / 待复用结果 / 即梦视频 / 即梦成片
+  scene 优先匹配：
+    场景 / 环境 / 背景 / 镜头 / 分镜 / 旋转木马 / 游乐园 / 乐园
+  source 匹配：
+    道具 / 配饰 / 头饰 / 发箍 / 船 / 天鹅船 / 玩具 / 小物 / 物件 / 物品
+
+index.html
+  版本参数更新为：
+    styles.css?v=20260623-column-rules
+    app.js?v=20260623-column-rules
+
+dist/
+  已同步 index.html / styles.css / app.js / _headers
+
+photoManage-cloudflare-pages.zip
+  已重新打包
+```
+
+验证结果：
+
+```text
+node --check app.js 通过
+node --check server.js 通过
+node --check dist/app.js 通过
+dist matches source
+规则测试：
+  可爱旋转木马场景 -> scene
+  爱心发箍 -> source
+  即梦视频成片 -> output
+curl http://localhost:3000/ 可看到 app.js?v=20260623-column-rules
+本地服务已重启到 http://localhost:3000
+```
+
+## 2026-06-23 画布对应框入列增强
+
+用户澄清：
+
+```text
+识别完成后应该放在对应的框里。
+例如头饰 / 发箍 / 道具类素材不应该停在「输出结果」框。
+```
+
+已调整：
+
+```text
+server.js
+  Qwen prompt 新增 canvas_column_id 字段
+  要求 Qwen 只能返回：
+    source
+    state
+    scene
+    output
+  新增画布列选择规则：
+    source：普通参考图、角色参考、道具、配饰、头饰、玩具、原始图、单个物体、可复用素材
+    state：角色表情、造型、姿态、服装上身效果、人物状态
+    scene：环境、场景、建筑、街道、房间、天气、氛围、分镜、镜头参考
+    output：已经生成的视频、成片、最终输出、待复用结果
+  sanitizeAnalysis 会清洗 canvas_column_id，不合法时降级为 source
+
+app.js
+  makeAssetFromAnalysis 保存 canvasColumnId
+  inferCanvasColumnId 优先使用 AI 返回的 canvasColumnId
+  本地兜底入列加入 visualFeatures
+  本地 source 关键词增强：
+    配饰 / 头饰 / 发箍 / 船 / 天鹅船 / 玩具 / 小物 / 物件 / 物品
+
+index.html
+  版本参数更新为：
+    styles.css?v=20260623-column-id
+    app.js?v=20260623-column-id
+
+dist/
+  已同步 index.html / styles.css / app.js / _headers
+
+photoManage-cloudflare-pages.zip
+  已重新打包
+```
+
+验证结果：
+
+```text
+node --check app.js 通过
+node --check server.js 通过
+node --check dist/app.js 通过
+dist matches source
+curl http://localhost:3000/ 可看到 app.js?v=20260623-column-id
+本地服务已重启到 http://localhost:3000
+```
+
+## 2026-06-23 画布识别后自动入列修复
+
+用户反馈：
+
+```text
+视觉模型识别成功，但图片没有放到该放的画布列里。
+示例：卡通天鹅船识别成功后停在「输出结果」列。
+```
+
+问题判断：
+
+```text
+处理中素材的描述包含「正在生成标题」。
+inferCanvasColumnId 之前把「生成」匹配为 output。
+因此处理中卡片会先进入「输出结果」列。
+AI 识别完成后，layout.items 已存在，ensureCanvasAssetPositions 只补 columnId，不会重新按最终识别结果入列。
+```
+
+已调整：
+
+```text
+app.js
+  inferCanvasColumnId 中 processing 状态固定进入 source / 参考素材
+  output 关键词从泛化的「生成」改为更明确的「生成结果」
+  新增 autoPlaced 标记
+  新建素材位置 autoPlaced = true
+  用户拖拽素材后 autoPlaced = false
+  AI 识别完成后：
+    如果素材仍是自动摆放状态
+    且最终识别列和当前列不同
+    自动移动到最终识别列
+  用户手动拖过的素材不会被 AI 结果重新移动
+
+index.html
+  版本参数更新为：
+    styles.css?v=20260623-canvas-reflow
+    app.js?v=20260623-canvas-reflow
+
+dist/
+  已同步 index.html / styles.css / app.js / _headers
+
+photoManage-cloudflare-pages.zip
+  已重新打包
+```
+
+验证结果：
+
+```text
+node --check app.js 通过
+node --check server.js 通过
+node --check dist/app.js 通过
+dist matches source
+curl http://localhost:3000/ 可看到 app.js?v=20260623-canvas-reflow
+本地服务已重启到 http://localhost:3000
+```
+
+## 2026-06-23 Qwen-VL-Plus 真实图片识别链路
+
+用户要求：
+
+```text
+以 qwen-vl-plus 模型先打通前后端链路，实现上传图片后自动识别然后分类的效果。
+```
+
+实施方案：
+
+```text
+保持当前无 npm 依赖的 Node 服务。
+不引入数据库，继续使用 localStorage 保存前端素材状态。
+后端新增 /api/analyze-image，前端上传后把图片 data URL、文件名、项目列表和当前项目 ID 发给后端。
+后端调用阿里云百炼 OpenAI 兼容接口：
+  https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions
+模型默认：
+  qwen-vl-plus
+```
+
+已调整：
+
+```text
+server.js
+  新增 .env 读取能力，不依赖 dotenv
+  新增 DASHSCOPE_API_KEY / QWEN_VISION_MODEL / QWEN_API_URL 配置
+  新增 POST /api/analyze-image
+  接收 imageDataUrl / fileName / preferredProjectId / projects
+  调用 qwen-vl-plus 视觉模型
+  使用 response_format=json_object 要求返回 JSON
+  解析并清洗 AI 返回字段：
+    title
+    description
+    tags
+    visual_features
+    recommended_project_id
+    confidence
+    reason
+  若未配置 DASHSCOPE_API_KEY，返回 503 和明确错误信息
+  若推荐项目 ID 不在项目列表中，自动降级为 unassigned
+  增加 CORS 响应头，方便前端和后端分离部署
+
+app.js
+  handleFiles 不再使用 setTimeout 模拟 AI 识别
+  新增 analyzeUploadedImage 调用 /api/analyze-image
+  新增 makeAssetFromAnalysis，把 AI JSON 映射到素材结构
+  新增 makeFailedAnalysisAsset，识别失败时保留图片并进入待确认
+  支持 localStorage.photoManage.apiBaseUrl 指向独立后端域名
+  项目画布内上传仍自动 confirmed 到当前项目
+  素材库首页上传仍根据 confidence 进入 recommended / possible / pending
+
+.env.example
+  新增 DASHSCOPE_API_KEY
+  新增 QWEN_VISION_MODEL=qwen-vl-plus
+  新增 QWEN_API_URL
+
+README.md
+  更新本地启动说明
+  新增 Qwen 视觉识别链路说明
+  更新已实现能力，不再描述为纯模拟 AI
+
+dist/
+  已同步 index.html / styles.css / app.js / _headers
+
+photoManage-cloudflare-pages.zip
+  已重新打包
+```
+
+验证结果：
+
+```text
+node --check app.js 通过
+node --check server.js 通过
+node --check dist/app.js 通过
+dist matches source
+curl http://localhost:3000/ 返回 200
+未配置 DASHSCOPE_API_KEY 时：
+  POST /api/analyze-image 返回 503
+  body = {"error":"MISSING_DASHSCOPE_API_KEY","message":"请先配置 DASHSCOPE_API_KEY 再启动服务。"}
+说明：
+  当前环境没有用户的百炼 API Key，因此未做真实 qwen-vl-plus 在线识别调用。
+  配置 .env 后重启 node server.js 即可走真实视觉识别链路。
+```
+
+## 2026-06-23 项目空状态自愈修复
+
+用户反馈：
+
+```text
+项目都没了，并且新建项目失败。
+```
+
+问题判断：
+
+```text
+本地 localStorage 可能保留了空素材 / 空项目 / 默认项目被删除的状态。
+旧 loadState 只在 saved.assets.length 为真时读取本地状态，不适合真实空素材库。
+同时 deletedProjectIds 可能让默认项目全部被过滤，导致侧栏项目列表为空。
+```
+
+已调整：
+
+```text
+app.js
+  loadState 改为只要 saved.assets 是数组就读取本地状态，允许素材数量为 0
+  新增 hasUsableProjects
+  loadState 发现项目列表没有任何普通项目时，清空 deletedProjectIds 并恢复默认项目
+  getProjects 增加运行时自愈：
+    如果项目列表只剩 unassigned 或为空，自动恢复默认项目并保存状态
+
+dist/
+  已同步 index.html / styles.css / app.js / _headers
+
+photoManage-cloudflare-pages.zip
+  已重新打包
+```
+
+验证结果：
+
+```text
+node --check app.js 通过
+node --check server.js 通过
+node --check dist/app.js 通过
+dist matches source
+本地服务已重启到 http://localhost:3000
+```
+
+## 2026-06-23 项目空状态二次修复
+
+用户反馈：
+
+```text
+刷新后项目列表仍然为空，新建项目仍然不可用。
+```
+
+进一步判断：
+
+```text
+Chrome 可能仍在加载旧 app.js。
+同时 localStorage.deletedProjectIds 可能包含所有默认项目 ID：
+  lulu
+  cyber
+  ancient
+导致 normalizeProjects 把默认项目全部过滤掉。
+```
+
+已调整：
+
+```text
+index.html
+  styles.css 和 app.js 增加版本参数：
+    ?v=20260623-project-repair
+  避免浏览器继续使用旧缓存
+
+app.js
+  新增 repairDeletedProjectIds
+  如果 deletedProjectIds 同时包含所有默认项目，则自动清空 deletedProjectIds
+  loadState 调用 repairDeletedProjectIds 后再 normalizeProjects
+
+dist/
+  已同步 index.html / styles.css / app.js / _headers
+
+photoManage-cloudflare-pages.zip
+  已重新打包
+```
+
+验证结果：
+
+```text
+node --check app.js 通过
+node --check server.js 通过
+node --check dist/app.js 通过
+dist matches source
+模拟 deletedProjectIds = [lulu, cyber, ancient] 时，repairDeletedProjectIds 返回 []
+curl http://localhost:3000/ 可看到 app.js?v=20260623-project-repair
+本地服务已重启到 http://localhost:3000
+```
+
+## 2026-06-23 按钮无响应 JS 初始化修复
+
+用户反馈：
+
+```text
+页面所有按钮点击后都没有响应。
+```
+
+问题判断：
+
+```text
+Chrome 控制台报错：
+  SyntaxError: Identifier 'clamp' has already been declared
+Qwen 识别链路新增了一个 clamp(value, min, max, fallback)。
+原画布缩放逻辑已存在 clamp(value, min, max)。
+ES module 顶层函数名重复导致 app.js 整个模块初始化失败，因此 bindEvents 没有执行，所有按钮失效。
+```
+
+已调整：
+
+```text
+app.js
+  AI 置信度兜底函数从 clamp 改名为 clampScore
+  保留原画布 clamp 函数，避免影响缩放 / 拖拽逻辑
+
+index.html
+  版本参数更新为：
+    styles.css?v=20260623-js-fix
+    app.js?v=20260623-js-fix
+  强制 Chrome 加载新脚本
+
+dist/
+  已同步 index.html / styles.css / app.js / _headers
+
+photoManage-cloudflare-pages.zip
+  已重新打包
+```
+
+验证结果：
+
+```text
+node --check app.js 通过
+node --check server.js 通过
+node --check dist/app.js 通过
+dist matches source
+脚本扫描结果：no duplicate function names
+curl http://localhost:3000/ 可看到 app.js?v=20260623-js-fix
+本地服务已重启到 http://localhost:3000
+```
+
+## 2026-06-22 项目删除功能补充
+
+用户澄清：
+
+```text
+需要删除的是左侧项目，不是项目画布里的素材。
+```
+
+已调整：
+
+```text
+app.js
+  左侧项目列表改为项目行结构：项目按钮 + 项目操作三点菜单
+  全部素材 / 待确认项目不显示删除入口
+  普通项目右侧悬停显示三点按钮
+  三点菜单内新增「删除项目」
+  新增 deleteProject
+  删除项目时不删除素材
+  项目内素材统一移入「待确认项目」
+  同步清理该项目的 canvasLayouts
+  删除当前正在查看的项目后自动返回素材库
+  写入反馈记录并显示 toast
+  新增 deletedProjectIds，避免被删除的内置示例项目刷新后被 normalizeProjects 自动补回
+  点击「重置示例」会清空 deletedProjectIds，恢复示例项目
+  点击页面其他区域会关闭项目菜单
+
+styles.css
+  新增 project-row / project-menu-trigger / project-menu 样式
+  项目菜单默认隐藏，hover / focus 时显示
+  删除项目使用危险色样式
+
+dist/
+  已同步 index.html / styles.css / app.js / _headers
+
+photoManage-cloudflare-pages.zip
+  已重新打包，包含 index.html / styles.css / app.js / _headers
+```
+
+行为规则：
+
+```text
+删除项目「古风短剧」后：
+  项目从左侧列表移除
+  项目画布布局移除
+  原项目内素材不会删除
+  这些素材 projectId = null
+  recommendedProjectId = unassigned
+  status = pending
+  reason 更新为原项目已删除，等待重新归档
+```
+
+验证结果：
+
+```text
+node --check app.js 通过
+node --check server.js 通过
+node --check dist/app.js 通过
+dist matches source
+zip 包已重新生成
+浏览器验证：
+  左侧项目列表出现 3 个项目操作菜单
+  全部素材 / 待确认项目没有项目操作菜单
+  古风短剧菜单可打开，并只显示 1 个「删除项目」按钮
+说明：
+  自动化点击原生 window.confirm 后被浏览器确认框阻塞，新标签也受影响；
+  删除确认后的状态变化通过代码路径、语法检查和 dist 同步校验确认。
+```
+
+## 2026-06-22 项目列表数字对齐修复
+
+用户反馈：
+
+```text
+左侧项目列表里，有三点菜单的项目数字和没有三点菜单的项目数字没有对齐。
+```
+
+已调整：
+
+```text
+styles.css
+  project-nav-item 改为固定三列：名称列 / 数字列 / 操作列
+  project-row 不再使用菜单列参与布局
+  project-menu-wrap 改为绝对定位到项目行右侧
+  project-count 增加居中对齐
+
+dist/
+  已同步 index.html / styles.css / app.js / _headers
+
+photoManage-cloudflare-pages.zip
+  已重新打包
+```
+
+验证结果：
+
+```text
+node --check app.js 通过
+node --check dist/app.js 通过
+node --check server.js 通过
+dist matches source
+```
+
+## 2026-06-22 项目内上传确认状态修复
+
+用户反馈：
+
+```text
+确认功能还有问题，上传的每张照片都是未确认。
+```
+
+问题判断：
+
+```text
+项目画布内按钮显示「上传到项目名」。
+但 handleFiles 只把新素材 recommendedProjectId 设置为当前项目。
+AI 模拟识别完成后 analyzeFile 仍然让 projectId = null。
+status 也按分数变成 recommended / possible，而不是 confirmed。
+结果是项目内上传的图片看起来都只是推荐或未确认，并没有真正归档到当前项目。
+```
+
+已调整：
+
+```text
+app.js
+  analyzeFile 新增 shouldAutoConfirm 判断
+  从项目画布上传时：
+    projectId = 当前项目
+    recommendedProjectId = 当前项目
+    status = confirmed
+    reason 改为用户在该项目内上传，已直接归档
+  handleFiles 在项目内上传完成后写入反馈记录
+  首页素材库上传仍保留原有 AI 推荐 / 待确认流程
+
+dist/
+  已同步 index.html / styles.css / app.js / _headers
+
+photoManage-cloudflare-pages.zip
+  已重新打包
+```
+
+验证结果：
+
+```text
+node --check app.js 通过
+node --check server.js 通过
+node --check dist/app.js 通过
+dist matches source
+```
+
+## 2026-06-23 后端二阶段视觉识别与画布列分类
+
+用户判断：
+
+```text
+画布列归档不应该只靠前端关键词规则。
+图片上传后，后端应先调用视觉模型识别图片，再把视觉识别结果交给另一个思考 / 分类模型，
+结合当前项目已有类别，输出这个素材应该进入哪个画布类别。
+```
+
+产品结论：
+
+```text
+后端成为分类决策源。
+前端只负责把项目上下文和画布列定义传给后端，并按后端返回的 canvas_column_id 放入对应列。
+前端保留少量规则兜底，避免模型异常时素材全部进入错误列。
+```
+
+已调整：
+
+```text
+server.js
+  新增 qwenClassifierModel
+  支持环境变量 QWEN_CLASSIFIER_MODEL，默认 qwen-plus
+  /api/analyze-image 改为二阶段：
+    1. qwen-vl-plus / QWEN_VISION_MODEL 负责图片视觉理解
+    2. qwen-plus / QWEN_CLASSIFIER_MODEL 负责从现有画布列中选择 canvas_column_id
+  新增 defaultCanvasColumns
+  新增 normalizeCanvasColumns
+  新增 classifyCanvasColumnWithQwen
+  新增 buildCanvasClassifierPrompt
+  新增 sanitizeCanvasClassification
+  AI 成功日志增加 vision / classifier / column
+  分类模型失败时记录 [AI:COLUMN_ERROR]，并降级到 source 列
+
+app.js
+  analyzeUploadedImage 请求体新增 canvasColumns
+  makeAssetFromAnalysis 继续保存后端返回的 canvas_column_id
+  inferCanvasColumnId 改为优先尊重后端分类结果
+  但对 output 列保留强约束，避免普通静态图片被误判为输出结果
+  ensureCanvasAssetPositions 对 autoPlaced 素材支持识别完成后自动移入新列
+  用户手动拖动后的素材 autoPlaced = false，不再被自动改列
+
+index.html
+  资源版本更新到 20260623-ai-router，避免浏览器继续使用旧缓存
+
+.env.example
+  新增 QWEN_CLASSIFIER_MODEL=qwen-plus
+
+README.md
+  更新 Qwen 链路说明：
+    前端图片 data URL -> /api/analyze-image
+    后端视觉模型识别
+    后端分类模型决定画布类别
+    返回 title / description / tags / visual_features / canvas_column_id / recommended_project_id / confidence / reason
+
+dist/
+  已同步 index.html / styles.css / app.js / _headers
+
+photoManage-cloudflare-pages.zip
+  已重新打包
+```
+
+真实接口验证：
+
+```text
+POST /api/analyze-image
+测试图片：64x64 卡通场景色块图
+返回：
+  status = 200
+  title = 卡通场景轮播图
+  canvas_column_id = scene
+  canvas_column_reason = 图片为卡通风格的天空与大地场景，包含蓝天、绿地和太阳，属于环境类视觉元素，符合「场景 / 镜头」类别的定义。
+  recommended_project_id = unassigned
+  confidence = 0.6
+```
+
+服务日志：
+
+```text
+[AI] 2026-06-23T07:15:21.685Z vision=qwen-vl-plus classifier=qwen-plus file="carousel-scene-test.png" recommended=unassigned column=scene confidence=0.6 duration=4002ms
+```
+
+验证结果：
+
+```text
+node --check server.js 通过
+node --check app.js 通过
+node --check dist/app.js 通过
+dist matches source
+真实 /api/analyze-image 调用成功，并由后端分类模型返回 scene 列
+```
+
+## 2026-06-23 松鼠角色误入场景列修复
+
+用户反馈：
+
+```text
+松鼠嘚嘚这类单个角色图被放到了「场景 / 镜头」列。
+```
+
+问题判断：
+
+```text
+后端日志显示：
+  file="松鼠嘚嘚.png" recommended=lulu column=source confidence=0.95
+
+说明视觉 / 分类后端没有把该图判成 scene。
+真正问题在前端 inferCanvasColumnId：
+  1. 前端旧逻辑先跑本地关键词规则，再使用后端 canvasColumnId
+  2. visual.scene 的兜底值是「未知场景」
+  3. 本地 scene 正则只要看到「场景」就返回 scene
+结果导致后端返回 source 的素材仍被前端覆盖到「场景 / 镜头」列。
+```
+
+已调整：
+
+```text
+app.js
+  inferCanvasColumnId 改为真正优先使用后端 canvasColumnId
+  只有后端返回 output 时做额外保护，避免静态图片误入输出列
+  过滤「未知主体 / 未知场景 / 未知风格 / 素材参考」这类兜底词
+  本地兜底规则顺序改为：
+    output -> character/state -> source -> scene
+  新增松鼠、卡通形象、IP形象、动物角色、玩偶等角色关键词进入 state 兜底
+  scene 不再匹配泛化的单个「场景」词，改为环境、背景、镜头、分镜、游乐园、建筑等更具体词
+
+server.js
+  分类提示词新增主主体优先原则
+  明确不要因为识别结果里出现「场景」两个字就放入 scene
+  明确单个 IP 角色、动物角色、人物、卡通形象、玩偶形象、姿态造型应放 state
+  source 调整为道具、配饰、玩具、船、单个非角色物体、原始参考图
+
+index.html
+  资源版本更新到 20260623-character-router，避免浏览器继续使用旧 app.js
+
+dist/
+  已同步 index.html / styles.css / app.js / _headers
+
+photoManage-cloudflare-pages.zip
+  已重新打包
+```
+
+验证结果：
+
+```text
+node --check app.js 通过
+node --check server.js 通过
+node --check dist/app.js 通过
+dist matches source
+本地逻辑测试：
+  后端返回 source 的「圆润松鼠卡通形象」 -> source
+  没有后端列但标题为「圆润松鼠卡通形象」 -> state
+  「可爱旋转木马场景」 -> scene
+本地服务已重启：
+  http://localhost:3000
+```
+
+## 2026-06-24 图片素材误显示播放器修复
+
+用户反馈：
+
+```text
+每个素材都有播放控件。
+预期只有音频和后续视频素材才支持播放。
+```
+
+问题判断：
+
+```text
+index.html 模板中的 audio 元素默认带 hidden。
+但 styles.css 里 .asset-audio / .canvas-asset-audio 设置了 display:block。
+类选择器覆盖了浏览器默认 hidden 行为，导致图片卡片里隐藏的 audio 也显示出来。
+```
+
+已调整：
+
+```text
+styles.css
+  新增：
+    .asset-audio[hidden],
+    .canvas-asset-audio[hidden] {
+      display: none;
+    }
+
+index.html
+  资源版本更新到 20260624-audio-hidden，避免继续读取旧 CSS
+
+dist/
+  已同步 index.html / styles.css / app.js / _headers
+
+photoManage-cloudflare-pages.zip
+  已重新打包
+```
+
+验证结果：
+
+```text
+node --check app.js 通过
+node --check server.js 通过
+node --check dist/app.js 通过
+dist matches source
+curl http://localhost:3000 返回 HTTP/1.1 200 OK
+页面源码确认加载 20260624-audio-hidden
+```
+
+## 2026-06-24 MP4 视频素材上传支持
+
+用户反馈：
+
+```text
+上传 mp4 没有任何反应。
+```
+
+问题判断：
+
+```text
+上传入口 accept 只包含 image/*,audio/*。
+handleFiles 也只过滤 image/audio。
+所以 video/mp4 会被浏览器文件选择和前端过滤逻辑直接排除，不会进入素材队列。
+```
+
+已调整：
+
+```text
+index.html
+  fileInput accept 改为 image/*,audio/*,video/*
+  上传区文案改为支持图片 / 声音 / 视频
+  assetCardTemplate 新增 asset-video 播放器
+  canvasAssetTemplate 新增 canvas-asset-video 播放器
+  资源版本更新到 20260624-video-assets
+
+styles.css
+  新增 asset-video / canvas-asset-video 样式
+  hidden 规则覆盖视频播放器，避免非视频素材显示播放器
+
+app.js
+  handleFiles 支持 video/*
+  新增 isVideoFile / isVideoAsset
+  新增 analyzeUploadedVideo
+  新增 makeVideoAssetFromAnalysis
+  新增 makeVideoThumb
+  readMediaDuration 支持 video 元数据时长读取
+  video 素材：
+    type = video
+    videoSrc = data URL
+    canvasColumnId = output
+    自动进入「输出结果」列
+    首页和画布卡片显示 video controls
+    隐藏复制图片按钮
+  normalizeAssets 兼容 videoSrc 旧数据
+  inferCanvasColumnId 对 video 直接返回 output
+
+dist/
+  已同步 index.html / styles.css / app.js / _headers
+
+photoManage-cloudflare-pages.zip
+  已重新打包
+```
+
+验证结果：
+
+```text
+node --check app.js 通过
+node --check server.js 通过
+node --check dist/app.js 通过
+dist matches source
+curl http://localhost:3000 返回 HTTP/1.1 200 OK
+页面源码确认：
+  accept="image/*,audio/*,video/*"
+  asset-video / canvas-asset-video 存在
+  资源版本 20260624-video-assets
+```
+
+## 2026-06-24 视频卡片占位封面移除
+
+用户反馈：
+
+```text
+视频卡片上半部分的「视频」方片是多余的。
+真实 MP4 播放器已经显示在下方，不应该再显示占位封面。
+```
+
+问题判断：
+
+```text
+视频模板中同时存在 img 占位图和 video 播放器。
+renderCanvas / renderAssets 对 video 素材显示了播放器，但没有隐藏 img。
+因此视频素材会出现上方占位封面 + 下方真实播放器的重复媒体区。
+```
+
+已调整：
+
+```text
+app.js
+  renderAssets 中 video 素材设置 thumb.hidden = true
+  renderCanvas 中 video 素材设置 canvas-asset-image.hidden = true
+
+styles.css
+  新增：
+    .thumb[hidden],
+    .canvas-asset-image[hidden] {
+      display: none;
+    }
+
+index.html
+  资源版本更新到 20260624-video-clean
+
+dist/
+  已同步 index.html / styles.css / app.js / _headers
+
+photoManage-cloudflare-pages.zip
+  已重新打包
+```
+
+验证结果：
+
+```text
+node --check app.js 通过
+node --check server.js 通过
+node --check dist/app.js 通过
+dist matches source
+curl http://localhost:3000 返回 HTTP/1.1 200 OK
+页面源码确认加载 20260624-video-clean
+```
+
+## 2026-06-29 画布双指滑动平移
+
+用户反馈：
+
+```text
+希望 Mac 双指滑动时自由画布能往下 / 往左右跑，方便看见下面的素材。
+```
+
+已调整：
+
+```text
+app.js
+  canvasRuntime 新增 wheelSaveTimer
+  canvasViewport 新增 wheel 监听：
+    els.canvasViewport.addEventListener("wheel", handleCanvasWheelPan, { passive: false })
+  新增 handleCanvasWheelPan：
+    activeView=canvas 时拦截 wheel
+    双指上下滑动修改 layout.panY
+    双指左右滑动修改 layout.panX
+    ctrlKey 时忽略，避免触控板捏合缩放被当成平移
+    audio / video / select / textarea 上滚动时不抢事件
+    调用 applyCanvasTransform 即时移动画布
+    调用 renderCanvasMinimap 同步小地图视口
+    180ms 防抖 saveState，避免高频写 localStorage
+
+index.html
+  画布提示文案更新为「双指滑动或拖动画布空白处平移」
+  资源版本更新到 20260629-trackpad-pan
+
+dist/
+  已同步 index.html / styles.css / app.js / _headers
+
+photoManage-cloudflare-pages.zip
+  已重新打包
+```
+
+验证结果：
+
+```text
+node --check app.js 通过
+node --check server.js 通过
+node --check dist/app.js 通过
+dist matches source
+curl http://localhost:3000 返回 HTTP/1.1 200 OK
+页面源码确认加载 20260629-trackpad-pan
+```
+
+## 2026-06-23 画布素材磁力避让布局
+
+用户反馈：
+
+```text
+素材识别后转移到正确列，但很容易被原有素材遮挡。
+希望素材之间像磁力一样排斥，不能重叠在一起。
+```
+
+产品设计：
+
+```text
+画布素材卡片拥有固定碰撞盒。
+自动入列、识别完成换列、整理素材、手动拖动释放时，都执行列内排斥。
+拖动中的素材作为锚点，尽量保留用户释放的位置；同列里发生重叠的其它素材会向下让开。
+```
+
+已调整：
+
+```text
+app.js
+  CANVAS_LAYOUT_VERSION 升级到 5
+  新增 CANVAS_ASSET_WIDTH / HEIGHT / GAP / TOP_OFFSET 常量
+  ensureCanvasAssetPositions 不再用简单 slot * 250 固定排布
+  新增 findFreeCanvasAssetPosition：
+    按目标列已有卡片碰撞盒寻找第一个空位
+  新增 resolveCanvasAssetCollisions：
+    同列素材按矩形碰撞检测自动向下避让
+    拖动释放时以被拖动素材为锚点，其它素材让开
+    自动卡片会回到列内居中 x，手动拖动卡片保留用户 x
+    素材变多时自动拉长列高
+  tidyCanvasAssets 改为使用空位查找和碰撞解决
+  stopCanvasPointer 在素材拖动结束后触发排斥并重新渲染
+  getCanvasContentBounds 改为使用素材尺寸常量
+
+index.html
+  画布提示文案新增「卡片会自动避让」
+  资源版本更新到 20260623-magnetic-layout，避免旧 app.js 缓存
+
+dist/
+  已同步 index.html / styles.css / app.js / _headers
+
+photoManage-cloudflare-pages.zip
+  已重新打包
+```
+
+验证结果：
+
+```text
+node --check app.js 通过
+node --check server.js 通过
+node --check dist/app.js 通过
+dist matches source
+本地排斥逻辑测试：
+  三张同列重叠素材自动排为 y=198 / 446 / 694
+  hasOverlap=false
+本地服务：
+  http://localhost:3000 返回 HTTP/1.1 200 OK
+```
+
+## 2026-06-23 声音素材与音色列支持
+
+用户需求：
+
+```text
+支持上传声音素材，并在项目画布分组里新增「音色」这一列。
+声音素材仍然属于同一个项目素材库，不另起系统管理。
+```
+
+产品设计：
+
+```text
+统一素材库，多素材类型。
+asset.type 支持：
+  image
+  audio
+
+图片素材继续走 Qwen 视觉识别链路。
+声音素材先走本地元数据链路：
+  读取文件名、格式、时长
+  自动生成标题、描述、标签
+  自动进入 voice / 音色列
+
+后续如果接音频识别、转写或音乐理解模型，只需要替换 analyzeUploadedAudio。
+```
+
+已调整：
+
+```text
+index.html
+  fileInput accept 从 image/* 改为 image/*,audio/*
+  上传区文案改为支持图片 / 声音
+  assetCardTemplate 新增 asset-audio 播放器
+  canvasAssetTemplate 新增 canvas-asset-audio 播放器
+  画布提示文案新增音色关系
+  资源版本更新到 20260623-audio-assets
+
+app.js
+  CANVAS_COLUMNS 新增：
+    id = voice
+    title = 音色
+    hint = BGM、音效、旁白
+  output 列右移到 x=1600
+  loadState 使用 normalizeAssets 兼容旧素材
+  normalizeAssets：
+    旧素材默认 type=image
+    audio 素材自动补 thumbnail、canvasColumnId=voice、声音素材标签
+  handleFiles 支持 image/* 和 audio/*
+  图片继续调用 analyzeUploadedImage
+  音频调用 analyzeUploadedAudio
+  新增 readAudioDuration / formatAudioDuration
+  新增 makeAudioAssetFromAnalysis
+  新增 makeAudioThumb
+  inferCanvasColumnId 对 audio 直接返回 voice
+  renderAssets：
+    audio 显示播放器
+    audio 隐藏复制图片按钮
+  renderCanvas：
+    audio 显示播放器
+    audio 隐藏复制图片按钮
+  上传按钮文案从「上传图片」改为「上传素材」
+
+styles.css
+  新增 asset-audio / canvas-asset-audio 播放器样式
+
+server.js
+  defaultCanvasColumns 新增 voice / 音色
+  分类提示词新增：
+    BGM、音效、旁白、人声、环境音、音乐参考、音色参考，应放 voice
+
+dist/
+  已同步 index.html / styles.css / app.js / _headers
+
+photoManage-cloudflare-pages.zip
+  已重新打包
+```
+
+验证结果：
+
+```text
+node --check app.js 通过
+node --check server.js 通过
+node --check dist/app.js 通过
+dist matches source
+curl http://localhost:3000 返回 HTTP/1.1 200 OK
+页面源码确认：
+  accept="image/*,audio/*"
+  资源版本 20260623-audio-assets
+  上传区和画布文案包含声音 / 音色
+本地服务已重启：
+  http://localhost:3000
+```
