@@ -599,6 +599,24 @@ function sanitizeStoredAsset(value) {
   asset.status = normalizeAssetStatus(asset);
   asset.thumbnail = String(asset.thumbnail || "");
   asset.originalSrc = String(asset.originalSrc || "");
+  if (asset.type === "image" && asset.status === "processing" && isStaleProcessingAsset(asset)) {
+    asset.status = "failed";
+    asset.score = 0;
+    asset.title = asset.title === "AI 识别中" ? "识别中断素材" : asset.title;
+    asset.description = "AI 识别任务中断，原图已保留，可以点击重识别。";
+    asset.reason = "服务重启或连接中断导致 AI job 丢失。";
+    asset.updatedAt = new Date().toISOString();
+  }
+  if (asset.type === "image" && !asset.originalSrc && asset.thumbnail && !isGeneratedPlaceholder(asset.thumbnail)) {
+    asset.originalSrc = asset.thumbnail;
+  }
+  if (asset.type === "image" && asset.status === "failed") {
+    if (asset.originalSrc && !isGeneratedPlaceholder(asset.originalSrc)) {
+      asset.thumbnail = asset.originalSrc;
+    } else if (!asset.thumbnail || isGeneratedPlaceholder(asset.thumbnail)) {
+      asset.thumbnail = makeMissingOriginalThumb();
+    }
+  }
   asset.canvasColumnId = ["source", "state", "scene", "voice", "output"].includes(asset.canvasColumnId)
     ? asset.canvasColumnId
     : "";
@@ -617,6 +635,32 @@ function normalizeAssetStatus(asset) {
     return "failed";
   }
   return ["processing", "pending", "recommended", "possible", "confirmed"].includes(status) ? status : "pending";
+}
+
+function isStaleProcessingAsset(asset) {
+  const updatedAt = Date.parse(asset.updatedAt || asset.createdAt || 0) || 0;
+  return updatedAt > 0 && Date.now() - updatedAt > 10 * 60 * 1000;
+}
+
+function isGeneratedPlaceholder(source) {
+  return /%E5%BE%85%E7%A1%AE%E8%AE%A4|%E8%AF%86%E5%88%AB%E5%A4%B1%E8%B4%A5|%E5%8E%9F%E5%9B%BE%E7%BC%BA%E5%A4%B1|待确认|识别失败|原图缺失/.test(String(source || ""));
+}
+
+function makeMissingOriginalThumb() {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="960" height="720" viewBox="0 0 960 720">
+  <defs>
+    <linearGradient id="g" x1="0" x2="1" y1="0" y2="1">
+      <stop stop-color="#7a3b35"/>
+      <stop offset=".58" stop-color="#d9d2c4"/>
+      <stop offset="1" stop-color="#9d6b5d"/>
+    </linearGradient>
+  </defs>
+  <rect width="960" height="720" fill="url(#g)"/>
+  <rect x="120" y="120" width="720" height="420" rx="32" fill="rgba(255,255,255,.28)"/>
+  <text x="480" y="330" text-anchor="middle" font-family="Arial, sans-serif" font-size="64" font-weight="800" fill="#fff">原图缺失</text>
+  <text x="480" y="410" text-anchor="middle" font-family="Arial, sans-serif" font-size="34" font-weight="700" fill="rgba(255,255,255,.86)">请删除后重新上传</text>
+</svg>`;
+  return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
 }
 
 function clampNumber(value, min, max, fallback) {

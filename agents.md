@@ -1810,6 +1810,62 @@ dist/app.js 与 app.js 一致
 公网 tunnel 登录后可取到新版 app.js
 ```
 
+## 2026-07-02 识别失败仍显示原图修复
+
+用户反馈：
+
+```text
+识别失败后卡片仍显示「待确认」占位图，而不是上传的原图片。
+```
+
+问题判断：
+
+```text
+失败状态只是 AI 识别失败，不代表图片素材本身失败。
+UI 必须优先显示原图，不能用「待确认」或「识别失败」蒙版替代图片内容。
+当前后端已有 3 条旧失败素材缺少 originalSrc，thumbnail 也是占位 SVG；这类历史记录无法凭空恢复原图，只能提示重新上传。
+```
+
+已调整：
+
+```text
+app.js
+  getAssetImageSource：
+    failed 状态优先返回 originalSrc
+    没有 originalSrc 时返回非占位 thumbnail
+    两者都没有时才显示「原图缺失，请重传」专用占位
+  normalizeAssets：
+    image 素材如果 originalSrc 缺失但 thumbnail 是真实图片，则自动补 originalSrc
+    failed 素材如果 originalSrc 存在，则 thumbnail 强制同步为 originalSrc
+    failed 素材如果只有待确认 / 识别失败占位，则替换为「原图缺失」占位
+  makeFailedAnalysisAsset：
+    图片失败默认使用「原图缺失」占位，而不是空图或待确认占位
+  isGeneratedPlaceholder：
+    增加「原图缺失」占位识别
+
+server.js
+  sanitizeStoredAsset：
+    服务端同样执行 originalSrc / thumbnail 归一化
+    failed 图片有原图时强制显示原图
+    failed 图片没有原图时使用「原图缺失，请删除后重新上传」占位
+    processing 图片如果超过 10 分钟未更新，视为 AI job 中断，自动改为 failed，但保留 originalSrc 供重识别使用
+
+data/state.json
+  已清理 3 条旧 failed 占位素材：
+    由于这些记录没有保存 originalSrc，无法恢复原图
+    已改为明确的「原图缺失」提示，避免继续显示「待确认」假图
+  已将 1 条服务重启后卡住的 processing 素材转为 failed，并保留原图，可点击重识别
+```
+
+验证结果：
+
+```text
+node --check app.js 通过
+node --check server.js 通过
+node --check dist/app.js 通过
+dist/app.js 与 app.js 一致
+```
+
 ## 2026-07-02 账号密码登录保护
 
 用户要求：

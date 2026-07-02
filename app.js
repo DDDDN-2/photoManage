@@ -1883,7 +1883,7 @@ function makeFailedAnalysisAsset(fileName, preferredProjectId, error, type = "im
     score: 0,
     reason: error.message || "视觉模型暂时不可用。",
     status: "failed",
-    thumbnail: isAudio ? makeAudioThumb("音色") : isVideo ? makeVideoThumb("视频") : "",
+    thumbnail: isAudio ? makeAudioThumb("音色") : isVideo ? makeVideoThumb("视频") : makeMissingOriginalThumb(),
     originalSrc: "",
     canvasColumnId: isAudio ? "voice" : isVideo ? "output" : ""
   };
@@ -2284,15 +2284,19 @@ async function copyAssetImage(asset) {
 
 function getAssetImageSource(asset) {
   if (!asset) return "";
-  if (asset.status === "failed" && asset.originalSrc && !isGeneratedPlaceholder(asset.originalSrc)) {
-    return asset.originalSrc;
+  const originalSrc = String(asset.originalSrc || "");
+  const thumbnail = String(asset.thumbnail || "");
+  if (asset.status === "failed") {
+    if (originalSrc && !isGeneratedPlaceholder(originalSrc)) return originalSrc;
+    if (thumbnail && !isGeneratedPlaceholder(thumbnail)) return thumbnail;
+    return makeMissingOriginalThumb();
   }
-  return asset.thumbnail || asset.originalSrc || "";
+  return thumbnail || originalSrc || "";
 }
 
 function isGeneratedPlaceholder(source) {
   const text = String(source || "");
-  return /%E5%BE%85%E7%A1%AE%E8%AE%A4|%E8%AF%86%E5%88%AB%E5%A4%B1%E8%B4%A5|待确认|识别失败/.test(text);
+  return /%E5%BE%85%E7%A1%AE%E8%AE%A4|%E8%AF%86%E5%88%AB%E5%A4%B1%E8%B4%A5|%E5%8E%9F%E5%9B%BE%E7%BC%BA%E5%A4%B1|待确认|识别失败|原图缺失/.test(text);
 }
 
 function imageSourceToPngBlob(source) {
@@ -2426,8 +2430,18 @@ function normalizeAssets(assets) {
       next.status = "failed";
       next.description ||= "AI 识别失败，原图已保留，可重新识别或手动归档。";
     }
-    next.thumbnail ||= next.type === "audio" ? makeAudioThumb("音色") : next.type === "video" ? makeVideoThumb("视频") : makeThumb("待确认", "#8b8175", "#d9d2c4", "#9d6b5d");
     next.originalSrc ||= "";
+    if (next.type === "image" && !next.originalSrc && next.thumbnail && !isGeneratedPlaceholder(next.thumbnail)) {
+      next.originalSrc = next.thumbnail;
+    }
+    if (next.type === "image" && next.status === "failed") {
+      if (next.originalSrc && !isGeneratedPlaceholder(next.originalSrc)) {
+        next.thumbnail = next.originalSrc;
+      } else if (!next.thumbnail || isGeneratedPlaceholder(next.thumbnail)) {
+        next.thumbnail = makeMissingOriginalThumb();
+      }
+    }
+    next.thumbnail ||= next.type === "audio" ? makeAudioThumb("音色") : next.type === "video" ? makeVideoThumb("视频") : makeThumb("待确认", "#8b8175", "#d9d2c4", "#9d6b5d");
     if (next.type === "audio") {
       next.canvasColumnId = "voice";
       const tags = cleanAssetTags(next.tags);
@@ -2440,6 +2454,10 @@ function normalizeAssets(assets) {
     }
     return next;
   });
+}
+
+function makeMissingOriginalThumb() {
+  return makeThumb("原图缺失", "#7a3b35", "#d9d2c4", "#9d6b5d");
 }
 
 function insertBeforeUnassigned(projects, project) {
