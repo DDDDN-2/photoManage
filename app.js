@@ -235,8 +235,9 @@ function getDefaultState() {
 function saveState() {
   let backendSnapshot = "";
   try {
-    backendSnapshot = JSON.stringify(state);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(getLocalUiState()));
+    const uiState = getLocalUiState();
+    backendSnapshot = JSON.stringify(uiState);
+    localStorage.setItem(STORAGE_KEY, backendSnapshot);
   } catch {
     console.warn("Local storage quota exceeded; current session still works.");
   }
@@ -1456,19 +1457,25 @@ function handleFiles(fileList) {
       const isAudio = isAudioFile(file);
       const isVideo = isVideoFile(file);
       const uploadProject = uploadProjectId ? getProject(uploadProjectId) : null;
+      let asset = buildPendingUploadAsset(file, mediaDataUrl, uploadProjectId);
+      upsertAsset(asset);
+      render();
 
       try {
-        let asset = buildPendingUploadAsset(file, mediaDataUrl, uploadProjectId);
         if (isAudio) {
           asset = {
             ...asset,
             ...makeAudioAssetFromAnalysis(await analyzeUploadedAudio(file, mediaDataUrl, uploadProjectId), uploadProjectId, mediaDataUrl)
           };
+          upsertAsset(asset);
+          render();
         } else if (isVideo) {
           asset = {
             ...asset,
             ...makeVideoAssetFromAnalysis(await analyzeUploadedVideo(file, mediaDataUrl, uploadProjectId), uploadProjectId, mediaDataUrl)
           };
+          upsertAsset(asset);
+          render();
         }
 
         const createdAsset = await createBackendAsset(asset);
@@ -1493,8 +1500,24 @@ function handleFiles(fileList) {
         }
         render();
       } catch (error) {
+        upsertAsset({
+          ...asset,
+          ...makeFailedAnalysisAsset(file.name, uploadProjectId, error, asset.type),
+          id: asset.id,
+          type: asset.type,
+          thumbnail: asset.thumbnail,
+          originalSrc: asset.originalSrc,
+          audioSrc: asset.audioSrc,
+          videoSrc: asset.videoSrc,
+          createdAt: asset.createdAt,
+          updatedAt: new Date().toISOString()
+        });
+        render();
         showToast(error.message || "素材上传失败");
       }
+    });
+    reader.addEventListener("error", () => {
+      showToast(`读取「${file.name || "素材"}」失败`);
     });
     reader.readAsDataURL(file);
   });

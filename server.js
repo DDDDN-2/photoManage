@@ -780,7 +780,7 @@ async function handleAssetAnalyze(request, response, assetId) {
       assetId,
       fileName: body.fileName || asset.title,
       preferredProjectId: body.preferredProjectId || asset.recommendedProjectId,
-      imageDataUrl: body.imageDataUrl || asset.thumbnail
+      imageDataUrl: body.imageDataUrl || asset.originalSrc || asset.thumbnail
     });
 
     sendJson(response, 202, {

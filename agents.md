@@ -1775,18 +1775,29 @@ app.js
     没有识别到支持的图片、音频或视频文件
   进入上传流程后立即 toast：
     N 个素材正在上传
+  文件读入完成后立即 upsert 本地 processing 卡片并 render：
+    即使后端创建 asset 或 AI job 较慢，画布也会马上出现「AI 识别中」
+  上传失败 catch 分支会把本地卡片改为 failed：
+    保留 thumbnail / originalSrc / audioSrc / videoSrc，避免失败后变成纯占位图
+  FileReader 增加 error 监听：
+    文件读取失败时显示明确 toast
   isImageFile / isAudioFile / isVideoFile 增加文件扩展名兜底：
     图片：png / jpg / jpeg / webp / gif / bmp / avif / heic / heif
     音频：mp3 / wav / m4a / aac / ogg / flac / opus
     视频：mp4 / mov / webm / m4v / avi / mkv
   新增 normalizeMediaDataUrl：
     当 FileReader 生成的 data URL MIME 为空或不匹配时，按文件扩展名补成 image/audio/video MIME
+  saveState 只向 /api/state 同步 getLocalUiState：
+    不再把 state.assets 作为快照反写后端，避免旧前端状态覆盖后端 authoritative asset
 
 dist/
   已同步 app.js
 
 photoManage-cloudflare-pages.zip
   已重新打包
+
+server.js
+  /api/assets/:id/analyze 重新识别时优先使用 asset.originalSrc，其次才 fallback 到 asset.thumbnail
 ```
 
 验证结果：
@@ -1794,6 +1805,9 @@ photoManage-cloudflare-pages.zip
 ```text
 node --check app.js 通过
 node --check server.js 通过
+node --check dist/app.js 通过
+dist/app.js 与 app.js 一致
+公网 tunnel 登录后可取到新版 app.js
 ```
 
 ## 2026-07-02 账号密码登录保护
