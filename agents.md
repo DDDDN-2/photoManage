@@ -2028,6 +2028,110 @@ node --check dist/app.js 通过
   页面包含「重新同步」按钮
 ```
 
+## 2026-07-02 后端资产状态主导
+
+用户要求：
+
+```text
+不需要「重新同步」功能。
+改成底层解决：
+1. 移除重新同步按钮
+2. 新增接口
+3. 上传后先创建后端 asset，再跑 AI job
+4. 前端不再把 state.assets 当主数据源保存到 localStorage
+5. 旧 pending · 0% 失败素材改为 failed，显示「重新识别」，同时不要用待确认蒙版，还是显示原图片
+```
+
+已调整：
+
+```text
+index.html
+  移除「重新同步」按钮
+  状态筛选新增「识别失败」
+  资源版本更新到 20260702-assets-api
+
+server.js
+  新增 GET /api/assets
+  新增 POST /api/assets
+    前端上传后先创建后端 asset
+    后端返回 asset，status 初始为 processing
+  新增 PATCH /api/assets/:id
+    用于确认归档、手动归档、移入待确认等单素材更新
+  新增 DELETE /api/assets/:id
+    删除后端素材并清理 canvasLayouts 中的布局记录
+  新增 POST /api/assets/:id/analyze
+    基于已存在 asset 创建 AI 识别 job
+    job 会绑定 assetId
+  /api/analyze-image-jobs/:jobId 返回 assetId 和后端最新 asset
+  AI job completed 时：
+    根据 Qwen 分析结果更新后端 asset 的 title / description / tags / recommendedProjectId / canvasColumnId / score / status
+    保留原 thumbnail / audioSrc / videoSrc
+  AI job failed 时：
+    后端 asset.status = failed
+    score = 0
+    description = AI 识别失败，原图已保留，可重新识别或手动归档
+    不覆盖 thumbnail
+  /api/state 写入时按 updatedAt 合并 assets，避免旧前端状态覆盖新的 AI job 结果
+  sanitizeStoredAsset 会把旧 pending + score 0 + 识别失败文案迁移成 failed
+
+app.js
+  localStorage 不再保存 state.assets
+  loadState 从 localStorage 只恢复项目、画布、反馈等 UI / 配置状态，assets 为空
+  hydrateBackendState 从 /api/state 拉取后端 assets 作为页面主数据源
+  saveState 写 localStorage 时移除 assets，只把完整状态保存到后端
+  上传图片流程改为：
+    FileReader 读取原图 data URL
+    buildPendingUploadAsset
+    POST /api/assets 创建后端 asset
+    前端渲染后端返回 asset
+    POST /api/assets/:id/analyze 启动 AI job
+    轮询 /api/analyze-image-jobs/:jobId
+    completed/failed 后用后端返回 asset 更新前端
+  音频 / 视频也先创建后端 asset
+  failed 状态显示：
+    状态 = 识别失败
+    分数区域 = 可重试
+    主按钮 = 重新识别
+    次按钮 = 手动归档
+  新增 retryAssetAnalysis：
+    使用保留的原图 thumbnail 重新调用 /api/assets/:id/analyze
+  旧 pending · 0% 且包含识别失败文案的素材自动迁移为 failed
+  旧失败素材如果只有“待确认”占位图，会改成“识别失败”占位图
+  新上传图片失败不再替换原图 thumbnail
+  确认归档 / 移入待确认 / 删除素材改为调用后端资产接口
+
+dist/
+  已同步 index.html / styles.css / app.js / _headers
+
+photoManage-cloudflare-pages.zip
+  已重新打包
+```
+
+验证结果：
+
+```text
+node --check server.js 通过
+node --check app.js 通过
+node --check dist/app.js 通过
+
+本地完整资产链路测试：
+  POST /api/assets -> 201，返回 processing asset
+  POST /api/assets/:id/analyze -> 202，返回 jobId
+  GET /api/analyze-image-jobs/:jobId -> processing
+  GET /api/analyze-image-jobs/:jobId -> completed，返回同一个 asset
+  后端 asset title 更新为「绿色方块基础素材」
+  测试 asset 已通过 DELETE /api/assets/:id 清理
+
+后台日志：
+  [AI] 2026-07-02T06:44:22.409Z async=true vision=qwen-vl-plus classifier=qwen-plus file="asset-api-green-block.png" recommended=unassigned column=source confidence=0.7 duration=4275ms
+
+公网 quick tunnel 已返回：
+  styles.css?v=20260702-assets-api
+  app.js?v=20260702-assets-api
+  状态筛选包含「识别失败」
+  页面不再包含「重新同步」
+```
+
 ## 2026-06-24 图片素材误显示播放器修复
 
 用户反馈：

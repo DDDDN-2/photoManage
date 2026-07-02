@@ -178,7 +178,6 @@ const els = {
   uploadButton: document.querySelector("#uploadButton"),
   dropZone: document.querySelector("#dropZone"),
   seedButton: document.querySelector("#seedButton"),
-  resyncButton: document.querySelector("#resyncButton"),
   logoutButton: document.querySelector("#logoutButton"),
   projectForm: document.querySelector("#projectForm"),
   projectNameInput: document.querySelector("#projectNameInput"),
@@ -209,7 +208,7 @@ hydrateBackendState();
 function loadState() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    const normalized = normalizeStoredState(saved);
+    const normalized = normalizeStoredState(saved, { includeAssets: false });
     if (normalized) return normalized;
   } catch {
     localStorage.removeItem(STORAGE_KEY);
@@ -221,7 +220,7 @@ function getDefaultState() {
   return {
     deletedProjectIds: [],
     projects: structuredClone(defaultProjects),
-    assets: normalizeAssets(structuredClone(sampleAssets)),
+    assets: [],
     canvasLayouts: {},
     feedback: [
       {
@@ -234,24 +233,34 @@ function getDefaultState() {
 }
 
 function saveState() {
-  let snapshot = "";
+  let backendSnapshot = "";
   try {
-    snapshot = JSON.stringify(state);
-    localStorage.setItem(STORAGE_KEY, snapshot);
+    backendSnapshot = JSON.stringify(state);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(getLocalUiState()));
   } catch {
     console.warn("Local storage quota exceeded; current session still works.");
   }
-  scheduleBackendStateSave(snapshot);
+  scheduleBackendStateSave(backendSnapshot);
 }
 
-function normalizeStoredState(saved) {
-  if (!saved || !Array.isArray(saved.assets)) return null;
+function getLocalUiState() {
+  return {
+    deletedProjectIds: state.deletedProjectIds,
+    projects: state.projects,
+    canvasLayouts: state.canvasLayouts,
+    feedback: state.feedback
+  };
+}
+
+function normalizeStoredState(saved, options = {}) {
+  if (!saved || typeof saved !== "object") return null;
+  const includeAssets = options.includeAssets !== false;
   const deletedProjectIds = repairDeletedProjectIds(saved.deletedProjectIds);
   const projects = normalizeProjects(saved.projects, deletedProjectIds);
   return {
     deletedProjectIds: hasUsableProjects(projects) ? deletedProjectIds : [],
     projects: hasUsableProjects(projects) ? projects : normalizeProjects(defaultProjects, []),
-    assets: normalizeAssets(saved.assets),
+    assets: includeAssets && Array.isArray(saved.assets) ? normalizeAssets(saved.assets) : [],
     feedback: saved.feedback || [],
     canvasLayouts: saved.canvasLayouts || {}
   };
@@ -274,11 +283,11 @@ async function hydrateBackendState() {
     }
     if (!response.ok) throw new Error("后端状态读取失败");
     const payload = await response.json();
-    const remoteState = normalizeStoredState(payload.state);
+    const remoteState = normalizeStoredState(payload.state, { includeAssets: true });
     if (remoteState) {
       Object.assign(state, remoteState);
       try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(getLocalUiState()));
       } catch {
         console.warn("Remote state is larger than localStorage; using in-memory state for this session.");
       }
@@ -402,7 +411,6 @@ function bindEvents() {
     render();
   });
 
-  els.resyncButton.addEventListener("click", resyncFromBackend);
   els.logoutButton.addEventListener("click", handleLogout);
 
   els.projectForm.addEventListener("submit", (event) => {
@@ -443,48 +451,6 @@ function bindEvents() {
     closeAssetMenus();
     closeProjectMenus();
   });
-}
-
-async function resyncFromBackend() {
-  const previousLabel = els.resyncButton.textContent;
-  els.resyncButton.disabled = true;
-  els.resyncButton.textContent = "同步中";
-  backendSync.hydrating = true;
-  window.clearTimeout(backendSync.saveTimer);
-
-  try {
-    localStorage.removeItem(STORAGE_KEY);
-    const response = await fetch(`${getApiBaseUrl()}/api/state`, {
-      method: "GET",
-      cache: "no-store"
-    });
-    if (response.status === 401) {
-      redirectToLogin();
-      return;
-    }
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}));
-      throw new Error(payload.message || "后端状态读取失败");
-    }
-
-    const payload = await response.json();
-    const remoteState = normalizeStoredState(payload.state);
-    Object.assign(state, remoteState || getDefaultState());
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    } catch {
-      console.warn("Remote state is larger than localStorage; using in-memory state for this session.");
-    }
-    backendSync.lastSnapshot = JSON.stringify(state);
-    render();
-    showToast("已重新同步后端状态");
-  } catch (error) {
-    showToast(error.message || "重新同步失败");
-  } finally {
-    backendSync.hydrating = false;
-    els.resyncButton.disabled = false;
-    els.resyncButton.textContent = previousLabel;
-  }
 }
 
 async function handleLogout() {
@@ -623,7 +589,7 @@ function renderAssets() {
     card.querySelector(".status-pill").textContent = statusLabel(asset.status);
     card.querySelector("h4").textContent = asset.title;
     card.querySelector(".score").textContent =
-      asset.status === "processing" ? "处理中" : `${Math.round(asset.score * 100)}%`;
+      asset.status === "processing" ? "处理中" : asset.status === "failed" ? "可重试" : `${Math.round(asset.score * 100)}%`;
     card.querySelector(".asset-description").textContent = asset.description;
     card.querySelector(".recommend-project").textContent = `推荐：${project.name}`;
     card.querySelector(".recommend-reason").textContent = asset.reason;
@@ -659,14 +625,26 @@ function renderAssets() {
       inlineFeedback.hidden = false;
       inlineFeedback.textContent = "正在修改归档项目，选择后点击保存。";
       confirmButton.textContent = "保存";
+    } else if (asset.status === "failed") {
+      inlineFeedback.hidden = false;
+      inlineFeedback.textContent = "AI 识别失败，原图已保留，可以重新识别或手动选择项目后确认。";
+      confirmButton.textContent = "重新识别";
+      rejectButton.textContent = "手动归档";
     }
 
     confirmButton.disabled = asset.status === "processing";
     confirmButton.addEventListener("click", () => {
-      confirmAsset(asset.id, select);
+      if (asset.status === "failed" && !isEditing) {
+        retryAssetAnalysis(asset.id);
+      } else {
+        confirmAsset(asset.id, select);
+      }
     });
     rejectButton.disabled = asset.status === "processing";
-    rejectButton.addEventListener("click", () => moveToPending(asset.id));
+    rejectButton.addEventListener("click", () => {
+      if (asset.status === "failed") confirmAsset(asset.id, select);
+      else moveToPending(asset.id);
+    });
     const copyImageButton = card.querySelector(".copy-image-button");
     copyImageButton.hidden = isAudio || isVideo;
     copyImageButton.disabled = asset.status === "processing" || isAudio || isVideo;
@@ -811,7 +789,9 @@ function renderCanvas() {
       video.hidden = false;
     }
     card.querySelector("strong").textContent = asset.title;
-    card.querySelector("span").textContent = `${statusLabel(asset.status)} · ${Math.round(asset.score * 100)}%`;
+    card.querySelector("span").textContent = asset.status === "failed"
+      ? `${statusLabel(asset.status)} · 可重试`
+      : `${statusLabel(asset.status)} · ${Math.round(asset.score * 100)}%`;
     card.querySelector(".canvas-delete-asset").addEventListener("click", (event) => {
       event.stopPropagation();
       deleteAsset(asset.id);
@@ -822,9 +802,12 @@ function renderCanvas() {
       event.stopPropagation();
       copyAssetImage(asset);
     });
-    card.querySelector(".pending-canvas-asset").addEventListener("click", (event) => {
+    const canvasActionButton = card.querySelector(".pending-canvas-asset");
+    if (asset.status === "failed") canvasActionButton.textContent = "重识别";
+    canvasActionButton.addEventListener("click", (event) => {
       event.stopPropagation();
-      moveToPending(asset.id);
+      if (asset.status === "failed") retryAssetAnalysis(asset.id);
+      else moveToPending(asset.id);
     });
     card.addEventListener("pointerdown", (event) => startCanvasElementDrag(event, "asset", asset.id));
     card.addEventListener("dblclick", () => {
@@ -1462,87 +1445,145 @@ function handleFiles(fileList) {
   const uploadProjectId = getActiveUploadProjectId();
   files.forEach((file) => {
     const reader = new FileReader();
-    const id = crypto.randomUUID();
-    const uploadProject = uploadProjectId ? getProject(uploadProjectId) : null;
-    const isAudio = isAudioFile(file);
-    const isVideo = isVideoFile(file);
-    const mediaTypeLabel = isAudio ? "声音" : isVideo ? "视频" : "图片";
-    const pendingAsset = {
-      id,
-      type: isAudio ? "audio" : isVideo ? "video" : "image",
-      title: "AI 识别中",
-      description: uploadProject
-        ? `${mediaTypeLabel}已进入「${uploadProject.name}」项目画布，后台正在识别并生成标题、标签和推荐理由。`
-        : `${mediaTypeLabel}已进入后台任务队列，正在识别并生成标题、标签和项目推荐。`,
-      tags: ["处理中"],
-      projectId: null,
-      recommendedProjectId: uploadProjectId || "unassigned",
-      score: 0,
-      reason: uploadProject
-        ? `根据当前所在项目，优先匹配「${uploadProject.name}」画像。`
-        : "等待多模态识别和项目画像匹配。",
-      status: "processing",
-      thumbnail: isAudio ? makeAudioThumb("音色") : isVideo ? makeVideoThumb("视频") : makeThumb("处理中", "#686058", "#ddd5ca", "#147f76"),
-      canvasColumnId: isAudio ? "voice" : isVideo ? "output" : ""
-    };
-    state.assets.unshift(pendingAsset);
-    render();
+    reader.addEventListener("load", async () => {
+      const mediaDataUrl = reader.result;
+      const isAudio = isAudioFile(file);
+      const isVideo = isVideoFile(file);
+      const uploadProject = uploadProjectId ? getProject(uploadProjectId) : null;
 
-    reader.addEventListener("load", () => {
-      if (isAudio) {
-        pendingAsset.audioSrc = reader.result;
-      } else if (isVideo) {
-        pendingAsset.videoSrc = reader.result;
-      } else {
-        pendingAsset.thumbnail = reader.result;
-      }
-      saveState();
-      render();
-      const analysisTask = isAudio
-        ? analyzeUploadedAudio(file, reader.result, uploadProjectId)
-        : isVideo
-          ? analyzeUploadedVideo(file, reader.result, uploadProjectId)
-        : analyzeUploadedImage(file, reader.result, uploadProjectId);
-      analysisTask
-        .then((analysis) => {
-          Object.assign(
-            pendingAsset,
-            isAudio
-              ? makeAudioAssetFromAnalysis(analysis, uploadProjectId, reader.result)
-              : isVideo
-                ? makeVideoAssetFromAnalysis(analysis, uploadProjectId, reader.result)
-                : makeAssetFromAnalysis(analysis, uploadProjectId)
-          );
-          if (pendingAsset.status === "confirmed" && uploadProject) {
+      try {
+        let asset = buildPendingUploadAsset(file, mediaDataUrl, uploadProjectId);
+        if (isAudio) {
+          asset = {
+            ...asset,
+            ...makeAudioAssetFromAnalysis(await analyzeUploadedAudio(file, mediaDataUrl, uploadProjectId), uploadProjectId, mediaDataUrl)
+          };
+        } else if (isVideo) {
+          asset = {
+            ...asset,
+            ...makeVideoAssetFromAnalysis(await analyzeUploadedVideo(file, mediaDataUrl, uploadProjectId), uploadProjectId, mediaDataUrl)
+          };
+        }
+
+        const createdAsset = await createBackendAsset(asset);
+        upsertAsset(createdAsset);
+        render();
+
+        if (!isAudio && !isVideo) {
+          const analyzedAsset = await analyzeUploadedImage(createdAsset, file, mediaDataUrl, uploadProjectId);
+          upsertAsset(analyzedAsset);
+          if (analyzedAsset.status === "confirmed" && uploadProject) {
             state.feedback.push({
               id: crypto.randomUUID(),
-              text: `已将「${pendingAsset.title}」上传并归档到${uploadProject.name}`,
+              text: `已将「${analyzedAsset.title}」上传并归档到${uploadProject.name}`,
               createdAt: new Date().toISOString()
             });
+            saveState();
           }
-          showToast(isAudio ? "声音素材已归入音色列" : isVideo ? "视频素材已归入输出结果列" : "AI 识别完成");
-        })
-        .catch((error) => {
-          const fallback = makeFailedAnalysisAsset(file.name, uploadProjectId, error, isAudio ? "audio" : isVideo ? "video" : "image");
-          if (!isAudio && !isVideo) {
-            delete fallback.thumbnail;
-          }
-          Object.assign(pendingAsset, fallback);
-          showToast(error.message || (isAudio ? "声音素材处理失败，已移入待确认" : isVideo ? "视频素材处理失败，已移入待确认" : "AI 识别失败，已移入待确认"));
-        })
-        .finally(() => {
+          showToast(analyzedAsset.status === "failed" ? "AI 识别失败，可重新识别" : "AI 识别完成");
+        } else {
+          showToast(isAudio ? "声音素材已归入音色列" : "视频素材已归入输出结果列");
           saveState();
-          render();
-        });
+        }
+        render();
+      } catch (error) {
+        showToast(error.message || "素材上传失败");
+      }
     });
     reader.readAsDataURL(file);
   });
   els.fileInput.value = "";
 }
 
-async function analyzeUploadedImage(file, imageDataUrl, preferredProjectId = null) {
+function buildPendingUploadAsset(file, mediaDataUrl, preferredProjectId = null) {
+  const uploadProject = preferredProjectId ? getProject(preferredProjectId) : null;
+  const isAudio = isAudioFile(file);
+  const isVideo = isVideoFile(file);
+  const mediaTypeLabel = isAudio ? "声音" : isVideo ? "视频" : "图片";
+  return {
+    id: crypto.randomUUID(),
+    type: isAudio ? "audio" : isVideo ? "video" : "image",
+    title: "AI 识别中",
+    description: uploadProject
+      ? `${mediaTypeLabel}已进入「${uploadProject.name}」项目画布，后台正在识别并生成标题、标签和推荐理由。`
+      : `${mediaTypeLabel}已进入后台任务队列，正在识别并生成标题、标签和项目推荐。`,
+    tags: ["处理中"],
+    projectId: null,
+    recommendedProjectId: preferredProjectId || "unassigned",
+    score: 0,
+    reason: uploadProject
+      ? `根据当前所在项目，优先匹配「${uploadProject.name}」画像。`
+      : "等待多模态识别和项目画像匹配。",
+    status: "processing",
+    thumbnail: isAudio ? makeAudioThumb("音色") : isVideo ? makeVideoThumb("视频") : mediaDataUrl,
+    audioSrc: isAudio ? mediaDataUrl : "",
+    videoSrc: isVideo ? mediaDataUrl : "",
+    canvasColumnId: isAudio ? "voice" : isVideo ? "output" : "",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+}
+
+async function createBackendAsset(asset) {
+  const response = await fetch(`${getApiBaseUrl()}/api/assets`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({ asset })
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (response.status === 401) {
+    redirectToLogin();
+    throw new Error("请先登录。");
+  }
+  if (!response.ok) throw new Error(payload.message || "创建素材失败");
+  return normalizeAssets([payload.asset])[0];
+}
+
+async function updateBackendAsset(assetId, changes) {
+  const response = await fetch(`${getApiBaseUrl()}/api/assets/${encodeURIComponent(assetId)}`, {
+    method: "PATCH",
+    headers: {
+      "content-type": "application/json"
+    },
+    body: JSON.stringify(changes)
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (response.status === 401) {
+    redirectToLogin();
+    throw new Error("请先登录。");
+  }
+  if (!response.ok) throw new Error(payload.message || "更新素材失败");
+  return normalizeAssets([payload.asset])[0];
+}
+
+async function deleteBackendAsset(assetId) {
+  const response = await fetch(`${getApiBaseUrl()}/api/assets/${encodeURIComponent(assetId)}`, {
+    method: "DELETE"
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (response.status === 401) {
+    redirectToLogin();
+    throw new Error("请先登录。");
+  }
+  if (!response.ok) throw new Error(payload.message || "删除素材失败");
+}
+
+function upsertAsset(asset) {
+  const normalized = normalizeAssets([asset])[0];
+  const index = state.assets.findIndex((item) => item.id === normalized.id);
+  if (index === -1) {
+    state.assets.unshift(normalized);
+  } else {
+    state.assets[index] = normalized;
+  }
+}
+
+async function analyzeUploadedImage(asset, file, imageDataUrl, preferredProjectId = null) {
   const apiBase = getApiBaseUrl();
   const requestBody = {
+    assetId: asset.id,
     fileName: file.name,
     imageDataUrl,
     preferredProjectId,
@@ -1559,7 +1600,7 @@ async function analyzeUploadedImage(file, imageDataUrl, preferredProjectId = nul
     }))
   };
 
-  const jobResponse = await fetch(`${apiBase}/api/analyze-image-jobs`, {
+  const jobResponse = await fetch(`${apiBase}/api/assets/${encodeURIComponent(asset.id)}/analyze`, {
     method: "POST",
     headers: {
       "content-type": "application/json"
@@ -1569,7 +1610,15 @@ async function analyzeUploadedImage(file, imageDataUrl, preferredProjectId = nul
 
   const jobPayload = await jobResponse.json().catch(() => ({}));
   if (jobResponse.status === 404) {
-    return analyzeUploadedImageSync(apiBase, requestBody);
+    return {
+      ...asset,
+      ...makeAssetFromAnalysis(await analyzeUploadedImageSync(apiBase, requestBody), preferredProjectId),
+      id: asset.id,
+      type: asset.type,
+      thumbnail: asset.thumbnail,
+      createdAt: asset.createdAt,
+      updatedAt: new Date().toISOString()
+    };
   }
   if (!jobResponse.ok) {
     throw new Error(jobPayload.message || "创建 AI 识别任务失败");
@@ -1612,15 +1661,50 @@ async function pollImageAnalysisJob(apiBase, jobId) {
       throw new Error(payload.message || "读取 AI 识别任务失败");
     }
     if (payload.status === "completed" && payload.analysis) {
-      return payload.analysis;
+      return normalizeAssets([payload.asset || makeAssetFromAnalysis(payload.analysis)])[0];
     }
     if (payload.status === "failed") {
-      throw new Error(payload.message || "AI 识别失败");
+      return normalizeAssets([payload.asset || makeFailedAnalysisAsset("识别失败素材", null, new Error(payload.message || "AI 识别失败"))])[0];
     }
     delayMs = Math.min(5000, Math.round(delayMs * 1.25));
   }
 
   throw new Error("AI 识别时间过长，请稍后重试。");
+}
+
+async function retryAssetAnalysis(assetId) {
+  const asset = state.assets.find((item) => item.id === assetId);
+  if (!asset || asset.type !== "image") {
+    showToast("只有图片素材支持重新识别");
+    return;
+  }
+  if (!String(asset.thumbnail || "").startsWith("data:image/")) {
+    showToast("这张素材缺少可重新识别的原图数据");
+    return;
+  }
+
+  const previousStatus = asset.status;
+  asset.status = "processing";
+  asset.score = 0;
+  asset.reason = "后台正在重新调用视觉模型识别。";
+  render();
+
+  try {
+    const result = await analyzeUploadedImage(
+      asset,
+      { name: asset.title || "重新识别图片" },
+      asset.thumbnail,
+      asset.recommendedProjectId && asset.recommendedProjectId !== "unassigned" ? asset.recommendedProjectId : null
+    );
+    upsertAsset(result);
+    showToast("重新识别完成");
+  } catch (error) {
+    asset.status = previousStatus || "failed";
+    asset.reason = error.message || "重新识别失败。";
+    showToast(error.message || "重新识别失败");
+  } finally {
+    render();
+  }
 }
 
 function sleep(ms) {
@@ -1766,8 +1850,8 @@ function makeFailedAnalysisAsset(fileName, preferredProjectId, error, type = "im
     recommendedProjectId: uploadProject?.id || "unassigned",
     score: 0,
     reason: error.message || "视觉模型暂时不可用。",
-    status: "pending",
-    thumbnail: isAudio ? makeAudioThumb("音色") : isVideo ? makeVideoThumb("视频") : makeThumb("待确认", "#8b8175", "#d9d2c4", "#9d6b5d"),
+    status: "failed",
+    thumbnail: isAudio ? makeAudioThumb("音色") : isVideo ? makeVideoThumb("视频") : "",
     canvasColumnId: isAudio ? "voice" : isVideo ? "output" : ""
   };
 }
@@ -1998,7 +2082,7 @@ function getActiveUploadProjectId() {
   return getProject(activeProject)?.id || null;
 }
 
-function confirmAsset(assetId, projectSelect) {
+async function confirmAsset(assetId, projectSelect) {
   const projectId = typeof projectSelect === "string" ? projectSelect : projectSelect.value;
   if (!projectId || projectId === "unassigned") {
     if (typeof projectSelect !== "string") {
@@ -2013,58 +2097,79 @@ function confirmAsset(assetId, projectSelect) {
   if (!asset) return;
   const project = getProject(projectId);
   const original = getProject(asset.recommendedProjectId);
-  asset.projectId = projectId;
-  asset.status = "confirmed";
-  editingAssetIds.delete(asset.id);
-  state.feedback.push({
-    id: crypto.randomUUID(),
-    text:
-      projectId === asset.recommendedProjectId
-        ? `已接受「${asset.title}」推荐归档到${project.name}`
-        : `已将「${asset.title}」从${original.name}改归档到${project.name}`,
-    createdAt: new Date().toISOString()
-  });
-  showToast(`已确认归档到「${project.name}」`);
-  saveState();
-  render();
+  try {
+    const updated = await updateBackendAsset(asset.id, {
+      projectId,
+      status: "confirmed",
+      updatedAt: new Date().toISOString()
+    });
+    upsertAsset(updated);
+    editingAssetIds.delete(asset.id);
+    state.feedback.push({
+      id: crypto.randomUUID(),
+      text:
+        projectId === asset.recommendedProjectId
+          ? `已接受「${asset.title}」推荐归档到${project.name}`
+          : `已将「${asset.title}」从${original.name}改归档到${project.name}`,
+      createdAt: new Date().toISOString()
+    });
+    showToast(`已确认归档到「${project.name}」`);
+    saveState();
+    render();
+  } catch (error) {
+    showToast(error.message || "确认归档失败");
+  }
 }
 
-function deleteAsset(assetId) {
+async function deleteAsset(assetId) {
   const asset = state.assets.find((item) => item.id === assetId);
   if (!asset) return;
   const confirmed = window.confirm(`确定删除「${asset.title}」吗？此操作只会从当前素材库移除这条记录。`);
   if (!confirmed) return;
 
-  state.assets = state.assets.filter((item) => item.id !== assetId);
-  Object.values(state.canvasLayouts || {}).forEach((layout) => {
-    if (layout?.items) delete layout.items[assetId];
-  });
-  editingAssetIds.delete(assetId);
-  state.feedback.push({
-    id: crypto.randomUUID(),
-    text: `已删除素材「${asset.title}」`,
-    createdAt: new Date().toISOString()
-  });
-  showToast("已删除素材");
-  saveState();
-  render();
+  try {
+    await deleteBackendAsset(assetId);
+    state.assets = state.assets.filter((item) => item.id !== assetId);
+    Object.values(state.canvasLayouts || {}).forEach((layout) => {
+      if (layout?.items) delete layout.items[assetId];
+    });
+    editingAssetIds.delete(assetId);
+    state.feedback.push({
+      id: crypto.randomUUID(),
+      text: `已删除素材「${asset.title}」`,
+      createdAt: new Date().toISOString()
+    });
+    showToast("已删除素材");
+    saveState();
+    render();
+  } catch (error) {
+    showToast(error.message || "删除素材失败");
+  }
 }
 
-function moveToPending(assetId) {
+async function moveToPending(assetId) {
   const asset = state.assets.find((item) => item.id === assetId);
   editingAssetIds.delete(assetId);
-  asset.projectId = null;
-  asset.recommendedProjectId = "unassigned";
-  asset.status = "pending";
-  asset.reason = "用户选择暂不归档，等待后续人工确认或补充项目画像。";
-  state.feedback.push({
-    id: crypto.randomUUID(),
-    text: `已将「${asset.title}」移入待确认项目`,
-    createdAt: new Date().toISOString()
-  });
-  showToast("已移入待确认项目");
-  saveState();
-  render();
+  try {
+    const updated = await updateBackendAsset(assetId, {
+      projectId: null,
+      recommendedProjectId: "unassigned",
+      status: "pending",
+      reason: "用户选择暂不归档，等待后续人工确认或补充项目画像。",
+      updatedAt: new Date().toISOString()
+    });
+    upsertAsset(updated);
+    state.feedback.push({
+      id: crypto.randomUUID(),
+      text: `已将「${asset.title}」移入待确认项目`,
+      createdAt: new Date().toISOString()
+    });
+    showToast("已移入待确认项目");
+    saveState();
+    render();
+  } catch (error) {
+    showToast(error.message || "移入待确认失败");
+  }
 }
 
 function searchSimilar(asset) {
@@ -2176,6 +2281,7 @@ function countAssetsByStatus() {
     },
     {
       processing: 0,
+      failed: 0,
       pending: 0,
       recommended: 0,
       possible: 0,
@@ -2241,7 +2347,15 @@ function normalizeAssets(assets) {
   return (Array.isArray(assets) ? assets : []).map((asset) => {
     const next = { ...asset };
     next.type ||= next.videoSrc ? "video" : next.audioSrc ? "audio" : "image";
+    const failureText = `${next.title || ""} ${next.description || ""} ${next.reason || ""} ${(next.tags || []).join(" ")}`;
+    if (next.status === "pending" && Number(next.score) === 0 && /识别失败|AI 识别失败|处理失败/.test(failureText)) {
+      next.status = "failed";
+      next.description ||= "AI 识别失败，原图已保留，可重新识别或手动归档。";
+    }
     next.thumbnail ||= next.type === "audio" ? makeAudioThumb("音色") : next.type === "video" ? makeVideoThumb("视频") : makeThumb("待确认", "#8b8175", "#d9d2c4", "#9d6b5d");
+    if (next.status === "failed" && /%E5%BE%85%E7%A1%AE%E8%AE%A4|待确认/.test(String(next.thumbnail))) {
+      next.thumbnail = makeThumb("识别失败", "#7f1d1d", "#d9d2c4", "#9d6b5d");
+    }
     if (next.type === "audio") {
       next.canvasColumnId = "voice";
       const tags = cleanAssetTags(next.tags);
@@ -2299,6 +2413,7 @@ function statusLabel(status) {
   return (
     {
       processing: "处理中",
+      failed: "识别失败",
       pending: "待确认",
       recommended: "待快速确认",
       possible: "可能相关",

@@ -90,6 +90,23 @@ const server = http.createServer(async (request, response) => {
     return;
   }
 
+  if (url.pathname === "/api/assets") {
+    await handleAssets(request, response);
+    return;
+  }
+
+  const assetMatch = url.pathname.match(/^\/api\/assets\/([^/]+)$/);
+  if (assetMatch) {
+    await handleAsset(request, response, decodeURIComponent(assetMatch[1]));
+    return;
+  }
+
+  const assetAnalyzeMatch = url.pathname.match(/^\/api\/assets\/([^/]+)\/analyze$/);
+  if (assetAnalyzeMatch) {
+    await handleAssetAnalyze(request, response, decodeURIComponent(assetAnalyzeMatch[1]));
+    return;
+  }
+
   if (url.pathname === "/api/analyze-image-jobs") {
     await handleAnalyzeImageJobCreate(request, response);
     return;
@@ -497,7 +514,9 @@ async function handleState(request, response) {
   if (request.method === "PUT" || request.method === "POST") {
     try {
       const body = await readJsonBody(request, maxStateJsonBytes, "保存数据太大，请先减少本地视频或改接对象存储。");
+      const previousState = readStoredStateOrDefault();
       const state = sanitizeStoredState(body.state || body);
+      state.assets = mergeStoredAssets(previousState.assets, state.assets);
       state.updatedAt = new Date().toISOString();
       writeStoredState(state);
       sendJson(response, 200, {
@@ -519,6 +538,26 @@ async function handleState(request, response) {
   sendJson(response, 405, { error: "METHOD_NOT_ALLOWED" });
 }
 
+function mergeStoredAssets(existingAssets, incomingAssets) {
+  if (!Array.isArray(incomingAssets) || !incomingAssets.length) return existingAssets || [];
+  const merged = new Map();
+  (existingAssets || []).forEach((asset) => merged.set(asset.id, asset));
+  incomingAssets.forEach((asset) => {
+    const current = merged.get(asset.id);
+    if (!current) {
+      merged.set(asset.id, asset);
+      return;
+    }
+    const currentTime = Date.parse(current.updatedAt || current.createdAt || 0) || 0;
+    const incomingTime = Date.parse(asset.updatedAt || asset.createdAt || 0) || 0;
+    if (incomingTime >= currentTime) merged.set(asset.id, asset);
+  });
+  const incomingIds = new Set(incomingAssets.map((asset) => asset.id));
+  return [...incomingAssets, ...(existingAssets || []).filter((asset) => !incomingIds.has(asset.id))]
+    .map((asset) => merged.get(asset.id) || asset)
+    .filter((asset, index, list) => list.findIndex((item) => item.id === asset.id) === index);
+}
+
 function readStoredState() {
   if (!fs.existsSync(stateFile)) return null;
   const raw = fs.readFileSync(stateFile, "utf8");
@@ -538,11 +577,222 @@ function sanitizeStoredState(value) {
   return {
     deletedProjectIds: Array.isArray(state.deletedProjectIds) ? state.deletedProjectIds.map(String) : [],
     projects: Array.isArray(state.projects) ? state.projects : [],
-    assets: Array.isArray(state.assets) ? state.assets : [],
+    assets: Array.isArray(state.assets) ? state.assets.map(sanitizeStoredAsset).filter(Boolean) : [],
     canvasLayouts: state.canvasLayouts && typeof state.canvasLayouts === "object" ? state.canvasLayouts : {},
     feedback: Array.isArray(state.feedback) ? state.feedback : [],
     updatedAt: typeof state.updatedAt === "string" ? state.updatedAt : null
   };
+}
+
+function sanitizeStoredAsset(value) {
+  if (!value || typeof value !== "object") return null;
+  const asset = { ...value };
+  asset.id = String(asset.id || crypto.randomUUID());
+  asset.type = ["image", "audio", "video"].includes(asset.type) ? asset.type : "image";
+  asset.title = String(asset.title || "未命名素材");
+  asset.description = String(asset.description || "");
+  asset.tags = Array.isArray(asset.tags) ? asset.tags.map(String).filter(Boolean).slice(0, 12) : [];
+  asset.projectId = asset.projectId ? String(asset.projectId) : null;
+  asset.recommendedProjectId = String(asset.recommendedProjectId || "unassigned");
+  asset.score = clampNumber(Number(asset.score), 0, 1, 0);
+  asset.reason = String(asset.reason || "");
+  asset.status = normalizeAssetStatus(asset);
+  asset.thumbnail = String(asset.thumbnail || "");
+  asset.canvasColumnId = ["source", "state", "scene", "voice", "output"].includes(asset.canvasColumnId)
+    ? asset.canvasColumnId
+    : "";
+  asset.createdAt = typeof asset.createdAt === "string" ? asset.createdAt : new Date().toISOString();
+  asset.updatedAt = typeof asset.updatedAt === "string" ? asset.updatedAt : asset.createdAt;
+  return asset;
+}
+
+function normalizeAssetStatus(asset) {
+  const status = String(asset.status || "");
+  const failedSignals = `${asset.title || ""} ${asset.description || ""} ${asset.reason || ""} ${(asset.tags || []).join(" ")}`;
+  if (
+    status === "failed" ||
+    (status === "pending" && Number(asset.score) === 0 && /识别失败|AI 识别失败|处理失败/.test(failedSignals))
+  ) {
+    return "failed";
+  }
+  return ["processing", "pending", "recommended", "possible", "confirmed"].includes(status) ? status : "pending";
+}
+
+function clampNumber(value, min, max, fallback) {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, value));
+}
+
+function readStoredStateOrDefault() {
+  return readStoredState() || {
+    deletedProjectIds: [],
+    projects: [],
+    assets: [],
+    canvasLayouts: {},
+    feedback: [],
+    updatedAt: null
+  };
+}
+
+async function handleAssets(request, response) {
+  if (request.method === "OPTIONS") {
+    sendJson(response, 204, {});
+    return;
+  }
+
+  if (request.method === "GET") {
+    const state = readStoredStateOrDefault();
+    sendJson(response, 200, {
+      assets: state.assets,
+      updatedAt: state.updatedAt
+    });
+    return;
+  }
+
+  if (request.method === "POST") {
+    try {
+      const body = await readJsonBody(request, maxStateJsonBytes, "素材数据太大，请先压缩后再上传。");
+      const state = readStoredStateOrDefault();
+      const now = new Date().toISOString();
+      const asset = sanitizeStoredAsset({
+        ...(body.asset || body),
+        id: body.asset?.id || body.id || crypto.randomUUID(),
+        createdAt: body.asset?.createdAt || body.createdAt || now,
+        updatedAt: now
+      });
+
+      state.assets = state.assets.filter((item) => item.id !== asset.id);
+      state.assets.unshift(asset);
+      state.updatedAt = now;
+      writeStoredState(state);
+
+      sendJson(response, 201, { asset });
+    } catch (error) {
+      sendJson(response, error.statusCode || 500, {
+        error: error.code || "ASSET_CREATE_FAILED",
+        message: error.publicMessage || "创建素材失败。"
+      });
+    }
+    return;
+  }
+
+  sendJson(response, 405, { error: "METHOD_NOT_ALLOWED" });
+}
+
+async function handleAsset(request, response, assetId) {
+  if (request.method === "OPTIONS") {
+    sendJson(response, 204, {});
+    return;
+  }
+
+  if (request.method === "PATCH") {
+    try {
+      const body = await readJsonBody(request, 1024 * 1024, "素材更新数据太大。");
+      const updated = updateStoredAsset(assetId, (asset) => ({
+        ...asset,
+        ...(body.asset || body),
+        id: asset.id,
+        type: body.asset?.type || body.type || asset.type,
+        thumbnail: body.asset?.thumbnail || body.thumbnail || asset.thumbnail,
+        createdAt: asset.createdAt,
+        updatedAt: new Date().toISOString()
+      }));
+      if (!updated) {
+        sendJson(response, 404, {
+          error: "ASSET_NOT_FOUND",
+          message: "素材不存在。"
+        });
+        return;
+      }
+      sendJson(response, 200, { asset: updated });
+    } catch (error) {
+      sendJson(response, error.statusCode || 500, {
+        error: error.code || "ASSET_UPDATE_FAILED",
+        message: error.publicMessage || "更新素材失败。"
+      });
+    }
+    return;
+  }
+
+  if (request.method === "DELETE") {
+    const state = readStoredStateOrDefault();
+    const existed = state.assets.some((asset) => asset.id === assetId);
+    state.assets = state.assets.filter((asset) => asset.id !== assetId);
+    Object.values(state.canvasLayouts || {}).forEach((layout) => {
+      if (layout?.items) delete layout.items[assetId];
+    });
+    state.updatedAt = new Date().toISOString();
+    writeStoredState(state);
+    sendJson(response, existed ? 200 : 404, existed ? { ok: true } : {
+      error: "ASSET_NOT_FOUND",
+      message: "素材不存在。"
+    });
+    return;
+  }
+
+  sendJson(response, 405, { error: "METHOD_NOT_ALLOWED" });
+}
+
+async function handleAssetAnalyze(request, response, assetId) {
+  if (request.method === "OPTIONS") {
+    sendJson(response, 204, {});
+    return;
+  }
+
+  if (request.method !== "POST") {
+    sendJson(response, 405, { error: "METHOD_NOT_ALLOWED" });
+    return;
+  }
+
+  if (!process.env.DASHSCOPE_API_KEY) {
+    sendJson(response, 503, {
+      error: "MISSING_DASHSCOPE_API_KEY",
+      message: "请先配置 DASHSCOPE_API_KEY 再启动服务。"
+    });
+    return;
+  }
+
+  try {
+    cleanupAiJobs();
+    const body = await readJsonBody(request);
+    const state = readStoredStateOrDefault();
+    const asset = state.assets.find((item) => item.id === assetId);
+    if (!asset) {
+      sendJson(response, 404, {
+        error: "ASSET_NOT_FOUND",
+        message: "素材不存在，请重新上传。"
+      });
+      return;
+    }
+
+    updateStoredAsset(assetId, (current) => ({
+      ...current,
+      status: "processing",
+      score: 0,
+      reason: "后台正在调用视觉模型重新识别。",
+      tags: current.tags?.length ? current.tags : ["处理中"],
+      updatedAt: new Date().toISOString()
+    }));
+
+    const job = createAnalyzeImageJob({
+      ...body,
+      assetId,
+      fileName: body.fileName || asset.title,
+      preferredProjectId: body.preferredProjectId || asset.recommendedProjectId,
+      imageDataUrl: body.imageDataUrl || asset.thumbnail
+    });
+
+    sendJson(response, 202, {
+      jobId: job.id,
+      status: job.status,
+      createdAt: job.createdAt
+    });
+  } catch (error) {
+    sendJson(response, error.statusCode || 500, {
+      error: error.code || "ASSET_ANALYZE_FAILED",
+      message: error.publicMessage || "创建素材识别任务失败。"
+    });
+  }
 }
 
 async function handleAnalyzeImage(request, response) {
@@ -605,25 +855,10 @@ async function handleAnalyzeImageJobCreate(request, response) {
   try {
     cleanupAiJobs();
     const body = await readJsonBody(request);
-    const jobId = crypto.randomUUID();
-    const now = new Date().toISOString();
-    const fileName = String(body.fileName || "untitled");
-    const job = {
-      id: jobId,
-      status: "processing",
-      fileName,
-      createdAt: now,
-      updatedAt: now,
-      completedAt: null,
-      analysis: null,
-      error: null
-    };
-    aiJobs.set(jobId, job);
-
-    runAnalyzeImageJob(job, body);
+    const job = createAnalyzeImageJob(body);
 
     sendJson(response, 202, {
-      jobId,
+      jobId: job.id,
       status: job.status,
       createdAt: job.createdAt
     });
@@ -656,17 +891,38 @@ function handleAnalyzeImageJobStatus(request, response, jobId) {
     return;
   }
 
-  sendJson(response, 200, {
-    jobId: job.id,
-    status: job.status,
-    fileName: job.fileName,
-    createdAt: job.createdAt,
-    updatedAt: job.updatedAt,
-    completedAt: job.completedAt,
-    analysis: job.status === "completed" ? job.analysis : null,
-    error: job.status === "failed" ? job.error?.code || "AI_IMAGE_ANALYSIS_FAILED" : null,
-    message: job.status === "failed" ? job.error?.message || "图片识别失败，请稍后重试。" : null
-  });
+	  sendJson(response, 200, {
+	    jobId: job.id,
+	    status: job.status,
+	    fileName: job.fileName,
+    assetId: job.assetId || null,
+	    createdAt: job.createdAt,
+	    updatedAt: job.updatedAt,
+	    completedAt: job.completedAt,
+	    analysis: job.status === "completed" ? job.analysis : null,
+    asset: job.status === "completed" || job.status === "failed" ? getStoredAsset(job.assetId) : null,
+	    error: job.status === "failed" ? job.error?.code || "AI_IMAGE_ANALYSIS_FAILED" : null,
+	    message: job.status === "failed" ? job.error?.message || "图片识别失败，请稍后重试。" : null
+	  });
+	}
+	
+function createAnalyzeImageJob(body) {
+  const jobId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const job = {
+    id: jobId,
+    assetId: body.assetId ? String(body.assetId) : null,
+    status: "processing",
+    fileName: String(body.fileName || "untitled"),
+    createdAt: now,
+    updatedAt: now,
+    completedAt: null,
+    analysis: null,
+    error: null
+  };
+  aiJobs.set(jobId, job);
+  runAnalyzeImageJob(job, body);
+  return job;
 }
 
 function runAnalyzeImageJob(job, body) {
@@ -678,6 +934,20 @@ function runAnalyzeImageJob(job, body) {
       job.analysis = analysis;
       job.updatedAt = new Date().toISOString();
       job.completedAt = job.updatedAt;
+      if (job.assetId) {
+        const updatedAsset = makeAssetFromAnalysisForStorage(analysis, body.preferredProjectId);
+        updateStoredAsset(job.assetId, (asset) => ({
+          ...asset,
+          ...updatedAsset,
+          id: asset.id,
+          type: asset.type,
+          thumbnail: asset.thumbnail,
+          audioSrc: asset.audioSrc,
+          videoSrc: asset.videoSrc,
+          createdAt: asset.createdAt,
+          updatedAt: job.completedAt
+        }));
+      }
       console.log(
         `[AI] ${job.completedAt} async=true vision=${qwenVisionModel} classifier=${qwenClassifierModel} file="${job.fileName}" recommended=${analysis.recommended_project_id} column=${analysis.canvas_column_id} confidence=${analysis.confidence} duration=${Date.now() - startedAt}ms`
       );
@@ -691,10 +961,73 @@ function runAnalyzeImageJob(job, body) {
       };
       job.updatedAt = new Date().toISOString();
       job.completedAt = job.updatedAt;
+      if (job.assetId) {
+        updateStoredAsset(job.assetId, (asset) => ({
+          ...asset,
+          status: "failed",
+          score: 0,
+          tags: asset.tags?.length ? asset.tags : ["识别失败"],
+          description: "AI 识别失败，原图已保留，可重新识别或手动归档。",
+          reason: job.error.message,
+          updatedAt: job.completedAt
+        }));
+      }
       console.error(
         `[AI:ERROR] ${job.completedAt} async=true code=${job.error.code} status=${job.error.statusCode} duration=${Date.now() - startedAt}ms message=${job.error.message}`
       );
     });
+}
+
+function getStoredAsset(assetId) {
+  if (!assetId) return null;
+  return readStoredStateOrDefault().assets.find((asset) => asset.id === assetId) || null;
+}
+
+function updateStoredAsset(assetId, updater) {
+  const state = readStoredStateOrDefault();
+  const index = state.assets.findIndex((asset) => asset.id === assetId);
+  if (index === -1) return null;
+  const updated = sanitizeStoredAsset(updater(state.assets[index]));
+  state.assets[index] = updated;
+  state.updatedAt = new Date().toISOString();
+  writeStoredState(state);
+  return updated;
+}
+
+function makeAssetFromAnalysisForStorage(analysis, preferredProjectId = null) {
+  const state = readStoredStateOrDefault();
+  const projectIds = new Set(state.projects.map((project) => String(project.id)));
+  const shouldAutoConfirm = preferredProjectId && preferredProjectId !== "all" && preferredProjectId !== "unassigned";
+  const recommendedProjectId = shouldAutoConfirm
+    ? preferredProjectId
+    : projectIds.has(analysis?.recommended_project_id)
+      ? analysis.recommended_project_id
+      : "unassigned";
+  const score = clampNumber(Number(analysis?.confidence), 0, 1, 0.5);
+  const status = shouldAutoConfirm
+    ? "confirmed"
+    : recommendedProjectId === "unassigned"
+      ? "pending"
+      : score >= 0.85
+        ? "recommended"
+        : score >= 0.65
+          ? "possible"
+          : "pending";
+
+  return {
+    title: cleanText(analysis?.title, "AI 识别图片素材"),
+    description: cleanText(analysis?.description, "图片已完成 AI 识别，等待确认归档。"),
+    tags: cleanArray(analysis?.tags).slice(0, 8),
+    visualFeatures: analysis?.visual_features || null,
+    canvasColumnId: ["source", "state", "scene", "voice", "output"].includes(analysis?.canvas_column_id)
+      ? analysis.canvas_column_id
+      : "",
+    projectId: shouldAutoConfirm ? preferredProjectId : null,
+    recommendedProjectId,
+    score,
+    reason: cleanText(analysis?.reason, "根据图片视觉内容和项目关键词自动推荐。"),
+    status
+  };
 }
 
 function cleanupAiJobs() {
