@@ -2132,6 +2132,57 @@ node --check dist/app.js 通过
   页面不再包含「重新同步」
 ```
 
+## 2026-07-02 失败态保留原图显示
+
+用户反馈：
+
+```text
+识别失败时不希望显示「识别失败」占位图，希望仍然显示原图片。
+```
+
+问题判断：
+
+```text
+旧版本失败时会把 thumbnail 替换成「待确认」或「识别失败」占位图。
+如果旧失败素材已经被覆盖，后端状态里只剩占位 SVG，无法从占位图反推出原图。
+但新上传素材可以通过额外保存 originalSrc 来保证失败后仍显示原图。
+```
+
+已调整：
+
+```text
+server.js
+  sanitizeStoredAsset 显式保留 originalSrc 字段
+
+app.js
+  buildPendingUploadAsset 为图片保存：
+    thumbnail = 原图 data URL
+    originalSrc = 原图 data URL
+  后端 asset 更新和 AI job 更新时保留 originalSrc
+  renderAssets / renderCanvas 改为使用 getAssetImageSource
+  getAssetImageSource 规则：
+    failed 且 originalSrc 存在时，优先显示 originalSrc
+    否则显示 thumbnail
+  retryAssetAnalysis 改为使用 getAssetImageSource
+  copyAssetImage 改为复制 getAssetImageSource
+  移除 failed 状态把 thumbnail 替换成「识别失败」占位图的逻辑
+  isGeneratedPlaceholder 会识别旧「待确认 / 识别失败」占位图，避免拿占位图重新识别
+
+dist/
+  已同步 index.html / styles.css / app.js / _headers
+
+photoManage-cloudflare-pages.zip
+  已重新打包
+```
+
+注意：
+
+```text
+旧失败素材如果当时已经被旧代码覆盖成占位图，且没有 originalSrc，无法自动恢复原图。
+这类旧素材需要删除后重新上传。
+新上传素材从此失败也会保留原图片显示。
+```
+
 ## 2026-06-24 图片素材误显示播放器修复
 
 用户反馈：

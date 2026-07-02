@@ -598,6 +598,7 @@ function sanitizeStoredAsset(value) {
   asset.reason = String(asset.reason || "");
   asset.status = normalizeAssetStatus(asset);
   asset.thumbnail = String(asset.thumbnail || "");
+  asset.originalSrc = String(asset.originalSrc || "");
   asset.canvasColumnId = ["source", "state", "scene", "voice", "output"].includes(asset.canvasColumnId)
     ? asset.canvasColumnId
     : "";

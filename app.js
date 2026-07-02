@@ -573,7 +573,7 @@ function renderAssets() {
     const isVideo = isVideoAsset(asset);
     card.dataset.type = asset.type || "image";
     const thumb = card.querySelector(".thumb");
-    thumb.src = asset.thumbnail;
+    thumb.src = getAssetImageSource(asset);
     thumb.alt = asset.title;
     thumb.hidden = isVideo;
     const audio = card.querySelector(".asset-audio");
@@ -775,7 +775,7 @@ function renderCanvas() {
     card.style.left = `${position.x}px`;
     card.style.top = `${position.y}px`;
     const image = card.querySelector(".canvas-asset-image");
-    image.src = asset.thumbnail;
+    image.src = getAssetImageSource(asset);
     image.alt = asset.title;
     image.hidden = isVideo;
     const audio = card.querySelector(".canvas-asset-audio");
@@ -1516,6 +1516,7 @@ function buildPendingUploadAsset(file, mediaDataUrl, preferredProjectId = null) 
       : "等待多模态识别和项目画像匹配。",
     status: "processing",
     thumbnail: isAudio ? makeAudioThumb("音色") : isVideo ? makeVideoThumb("视频") : mediaDataUrl,
+    originalSrc: !isAudio && !isVideo ? mediaDataUrl : "",
     audioSrc: isAudio ? mediaDataUrl : "",
     videoSrc: isVideo ? mediaDataUrl : "",
     canvasColumnId: isAudio ? "voice" : isVideo ? "output" : "",
@@ -1615,7 +1616,8 @@ async function analyzeUploadedImage(asset, file, imageDataUrl, preferredProjectI
       ...makeAssetFromAnalysis(await analyzeUploadedImageSync(apiBase, requestBody), preferredProjectId),
       id: asset.id,
       type: asset.type,
-      thumbnail: asset.thumbnail,
+          thumbnail: asset.thumbnail,
+          originalSrc: asset.originalSrc,
       createdAt: asset.createdAt,
       updatedAt: new Date().toISOString()
     };
@@ -1678,7 +1680,8 @@ async function retryAssetAnalysis(assetId) {
     showToast("只有图片素材支持重新识别");
     return;
   }
-  if (!String(asset.thumbnail || "").startsWith("data:image/")) {
+  const imageSource = getAssetImageSource(asset);
+  if (!String(imageSource || "").startsWith("data:image/") || isGeneratedPlaceholder(imageSource)) {
     showToast("这张素材缺少可重新识别的原图数据");
     return;
   }
@@ -1693,7 +1696,7 @@ async function retryAssetAnalysis(assetId) {
     const result = await analyzeUploadedImage(
       asset,
       { name: asset.title || "重新识别图片" },
-      asset.thumbnail,
+      imageSource,
       asset.recommendedProjectId && asset.recommendedProjectId !== "unassigned" ? asset.recommendedProjectId : null
     );
     upsertAsset(result);
@@ -1852,6 +1855,7 @@ function makeFailedAnalysisAsset(fileName, preferredProjectId, error, type = "im
     reason: error.message || "视觉模型暂时不可用。",
     status: "failed",
     thumbnail: isAudio ? makeAudioThumb("音色") : isVideo ? makeVideoThumb("视频") : "",
+    originalSrc: "",
     canvasColumnId: isAudio ? "voice" : isVideo ? "output" : ""
   };
 }
@@ -2186,7 +2190,8 @@ function searchSimilar(asset) {
 
 async function copyAssetImage(asset) {
   try {
-    const blob = await imageSourceToPngBlob(asset.thumbnail);
+    const imageSource = getAssetImageSource(asset);
+    const blob = await imageSourceToPngBlob(imageSource);
     if (!window.isSecureContext) {
       downloadBlob(blob, `${asset.title || "image"}.png`);
       showToast("局域网 HTTP 不能复制图片，已改为下载 PNG");
@@ -2205,7 +2210,7 @@ async function copyAssetImage(asset) {
 
     if (navigator.clipboard?.writeText) {
       try {
-        await navigator.clipboard.writeText(asset.thumbnail);
+        await navigator.clipboard.writeText(imageSource);
         showToast("浏览器不支持复制图片，已复制图片数据链接");
         return;
       } catch (error) {
@@ -2219,6 +2224,19 @@ async function copyAssetImage(asset) {
     console.error(error);
     showToast("复制失败，请右键图片保存后上传");
   }
+}
+
+function getAssetImageSource(asset) {
+  if (!asset) return "";
+  if (asset.status === "failed" && asset.originalSrc && !isGeneratedPlaceholder(asset.originalSrc)) {
+    return asset.originalSrc;
+  }
+  return asset.thumbnail || asset.originalSrc || "";
+}
+
+function isGeneratedPlaceholder(source) {
+  const text = String(source || "");
+  return /%E5%BE%85%E7%A1%AE%E8%AE%A4|%E8%AF%86%E5%88%AB%E5%A4%B1%E8%B4%A5|待确认|识别失败/.test(text);
 }
 
 function imageSourceToPngBlob(source) {
@@ -2353,9 +2371,7 @@ function normalizeAssets(assets) {
       next.description ||= "AI 识别失败，原图已保留，可重新识别或手动归档。";
     }
     next.thumbnail ||= next.type === "audio" ? makeAudioThumb("音色") : next.type === "video" ? makeVideoThumb("视频") : makeThumb("待确认", "#8b8175", "#d9d2c4", "#9d6b5d");
-    if (next.status === "failed" && /%E5%BE%85%E7%A1%AE%E8%AE%A4|待确认/.test(String(next.thumbnail))) {
-      next.thumbnail = makeThumb("识别失败", "#7f1d1d", "#d9d2c4", "#9d6b5d");
-    }
+    next.originalSrc ||= "";
     if (next.type === "audio") {
       next.canvasColumnId = "voice";
       const tags = cleanAssetTags(next.tags);
