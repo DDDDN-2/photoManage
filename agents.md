@@ -2008,6 +2008,57 @@ node --check app.js 通过
 随后清理 invalid-log-test.png 测试失败日志，避免污染真实失败列表
 ```
 
+## 2026-07-07 统一应用图标
+
+用户提供：
+
+```text
+assets/icon.svg
+```
+
+用户要求：
+
+```text
+将所有图标改成这个。
+```
+
+已调整：
+
+```text
+index.html / dist/index.html
+  当前 favicon 已指向 ./assets/icon.svg
+  侧边栏 brand-mark 已使用 ./assets/icon.svg
+
+server.js
+  登录页新增 favicon：
+    /assets/icon.svg
+  登录页原先写死的「AI」方块改为 img：
+    /assets/icon.svg
+  未登录状态下放行 /assets/icon.svg 静态资源
+  提取 sendStaticFile 复用静态文件响应逻辑
+
+assets/icon.svg
+dist/assets/icon.svg
+  两份图标内容一致
+```
+
+验证结果：
+
+```text
+node --check server.js 通过
+node --check app.js 通过
+未登录访问 /assets/icon.svg 返回：
+  HTTP/1.1 200 OK
+  content-type: image/svg+xml
+登录页 HTML 包含：
+  <link rel="icon" href="/assets/icon.svg" type="image/svg+xml" />
+  <div class="brand"><img src="/assets/icon.svg" alt="" /></div>
+公网 Tunnel 验证：
+  https://isle-registry-vice-humor.trycloudflare.com/assets/icon.svg
+  HTTP/2 200
+  content-type: image/svg+xml
+```
+
 ## 2026-07-02 账号密码登录保护
 
 用户要求：

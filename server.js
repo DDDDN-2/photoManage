@@ -77,6 +77,11 @@ const server = http.createServer(async (request, response) => {
     return;
   }
 
+  if (url.pathname === "/assets/icon.svg") {
+    sendStaticFile(response, path.join(root, "assets", "icon.svg"));
+    return;
+  }
+
   if (authEnabled && !isAuthenticated(request)) {
     if (url.pathname.startsWith("/api/")) {
       sendJson(response, 401, {
@@ -135,6 +140,10 @@ const server = http.createServer(async (request, response) => {
   const requestedPath = url.pathname === "/" ? "/index.html" : url.pathname;
   const filePath = path.normalize(path.join(root, requestedPath));
 
+  sendStaticFile(response, filePath);
+});
+
+function sendStaticFile(response, filePath) {
   if (!filePath.startsWith(root)) {
     response.writeHead(403);
     response.end("Forbidden");
@@ -154,7 +163,7 @@ const server = http.createServer(async (request, response) => {
     });
     response.end(data);
   });
-});
+}
 
 function sendLoginPage(response) {
   const configWarning = authEnabled && !authPassword
@@ -171,6 +180,7 @@ function sendLoginPage(response) {
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>登录 - AI 图片素材库</title>
+  <link rel="icon" href="/assets/icon.svg" type="image/svg+xml" />
   <style>
     :root {
       color-scheme: light;
@@ -210,12 +220,15 @@ function sendLoginPage(response) {
       height: 58px;
       display: grid;
       place-items: center;
+      overflow: hidden;
       margin-bottom: 18px;
       border-radius: 8px;
-      background: #158a7f;
-      color: #fff;
-      font-weight: 900;
-      font-size: 24px;
+      background: #28241f;
+    }
+    .brand img {
+      display: block;
+      width: 100%;
+      height: 100%;
     }
     h1 {
       margin: 0 0 8px;
@@ -289,7 +302,7 @@ function sendLoginPage(response) {
 </head>
 <body>
   <main>
-    <div class="brand">AI</div>
+    <div class="brand"><img src="/assets/icon.svg" alt="" /></div>
     <h1>登录素材库</h1>
     <p>外网访问已启用账号密码保护，登录后才能上传、识别和查看资源。</p>
     ${configWarning}

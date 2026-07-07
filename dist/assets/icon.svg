@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">AI 图片素材库图标</title>
+  <desc id="desc">暖白圆角应用图标，包含图片素材卡、归档色标和 AI 星标。</desc>
+  <defs>
+    <linearGradient id="base" x1="96" y1="54" x2="416" y2="462" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fffdf8"/>
+      <stop offset="1" stop-color="#efe3d1"/>
+    </linearGradient>
+    <linearGradient id="card" x1="150" y1="115" x2="380" y2="404" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#f7efe3"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#2d261c" flood-opacity="0.18"/>
+    </filter>
+  </defs>
+
+  <rect width="512" height="512" rx="112" fill="#28241f"/>
+  <rect x="36" y="36" width="440" height="440" rx="96" fill="url(#base)"/>
+  <path d="M103 96c44-35 110-48 174-35 72 14 132 60 153 123 19 57-1 126-45 178-43 51-107 85-175 78-70-7-130-53-158-113-34-73-7-178 51-231Z" fill="#fff7ea" opacity=".72"/>
+
+  <g filter="url(#shadow)">
+    <rect x="112" y="113" width="272" height="291" rx="36" fill="url(#card)"/>
+    <rect x="112" y="113" width="272" height="62" rx="36" fill="#ffffff"/>
+    <path d="M112 151c0 13.3 10.7 24 24 24h248v-26c0-19.9-16.1-36-36-36H148c-19.9 0-36 16.1-36 36v2Z" fill="#fffaf1"/>
+  </g>
+
+  <g>
+    <circle cx="151" cy="144" r="9" fill="#b94f6a"/>
+    <circle cx="181" cy="144" r="9" fill="#d79a2b"/>
+    <circle cx="211" cy="144" r="9" fill="#3566a8"/>
+  </g>
+
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M151 210h194" stroke="#ded8cf" stroke-width="12"/>
+    <path d="M151 312l48-55 38 40 32-32 73 78" stroke="#3566a8" stroke-width="20"/>
+    <circle cx="312" cy="245" r="25" fill="#d79a2b" stroke="#fffdf8" stroke-width="10"/>
+  </g>
+
+  <g>
+    <rect x="142" y="344" width="50" height="42" rx="12" fill="#3566a8"/>
+    <rect x="207" y="344" width="50" height="42" rx="12" fill="#b65f3a"/>
+    <rect x="272" y="344" width="50" height="42" rx="12" fill="#b94f6a"/>
+    <rect x="337" y="344" width="22" height="42" rx="11" fill="#d79a2b"/>
+  </g>
+
+  <g fill="none" stroke="#28241f" stroke-linecap="round" stroke-linejoin="round" stroke-width="14">
+    <path d="M386 91v38"/>
+    <path d="M367 110h38"/>
+  </g>
+  <g fill="none" stroke="#b65f3a" stroke-linecap="round" stroke-linejoin="round" stroke-width="11">
+    <path d="M344 78l16 16"/>
+    <path d="M412 146l16 16"/>
+  </g>
+</svg>

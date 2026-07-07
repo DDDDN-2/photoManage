@@ -69,11 +69,17 @@ button {
   place-items: center;
   width: 42px;
   height: 42px;
-  border: 1px solid rgba(255, 255, 255, 0.22);
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.2);
   border-radius: 8px;
   background: #147f76;
-  font-weight: 800;
-  letter-spacing: 0;
+  box-shadow: 0 10px 22px rgba(0, 0, 0, 0.18);
+}
+
+.brand-mark img {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .brand h1,
