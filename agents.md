@@ -1924,6 +1924,90 @@ GET /api/state 返回：
   feedback = 7
 ```
 
+## 2026-07-07 AI 识别任务日志表
+
+用户要求：
+
+```text
+加一张 ai_logs / ai_jobs 表，后续能分析为什么识别失败。
+```
+
+实现判断：
+
+```text
+沿用当前 SQLite 数据库，不引入新依赖。
+使用 ai_jobs 表承载 AI 调用日志：
+  一次同步诊断识别或一次异步上传 / 重识别任务 = 一条记录
+  成功记录推荐项目、画布列、置信度、耗时和模型
+  失败记录错误码、HTTP 状态、错误信息和耗时
+  不保存图片 base64，只保存请求摘要，避免日志表膨胀
+```
+
+已调整：
+
+```text
+server.js
+  initDatabase 新增 ai_jobs 表：
+    id
+    asset_id
+    type
+    status
+    vision_model
+    classifier_model
+    file_name
+    recommended_project_id
+    canvas_column_id
+    confidence
+    duration_ms
+    error_code
+    error_status
+    error_message
+    request_summary
+    response_json
+    created_at
+    updated_at
+    completed_at
+  新增索引：
+    idx_ai_jobs_asset_id
+    idx_ai_jobs_status
+    idx_ai_jobs_created_at
+  启动时 markInterruptedAiJobs：
+    把上次进程残留的 processing 任务标记为 failed
+    错误码 AI_JOB_INTERRUPTED
+  新增 createAiJobRecord / updateAiJobRecord / readAiJobRecord / listAiJobRecords
+  新增 summarizeAiRequest，只记录文件名、项目数量、列数量、是否有图片、图片体积估算
+  /api/analyze-image：
+    同步识别也写 ai_jobs
+  /api/analyze-image-jobs：
+    异步识别创建 processing 日志
+    成功 / 失败后更新同一条日志
+  /api/analyze-image-jobs/:id：
+    内存 job 找不到时回退查 SQLite ai_jobs
+  新增：
+    GET /api/ai-jobs
+    GET /api/ai-jobs?assetId=素材ID
+    GET /api/ai-jobs?status=failed&limit=20
+
+README.md
+  后端状态接口补充 GET /api/ai-jobs
+  说明 ai_jobs 可用于排查识别失败
+```
+
+验证结果：
+
+```text
+node --check server.js 通过
+node --check app.js 通过
+重启服务后确认 SQLite 已创建 ai_jobs 表
+调用一次识别后 GET /api/ai-jobs?assetId=... 可返回记录：
+  status = completed
+  type = sync_image_analysis
+  confidence = 0.95
+  durationMs = 6161
+构造 INVALID_IMAGE 失败请求验证 error_code / error_status / error_message 可写入
+随后清理 invalid-log-test.png 测试失败日志，避免污染真实失败列表
+```
+
 ## 2026-07-02 账号密码登录保护
 
 用户要求：

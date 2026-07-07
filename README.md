@@ -109,6 +109,7 @@ POST /api/analyze-image
 GET /api/state
 PUT /api/state
 GET /api/health
+GET /api/ai-jobs
 ```
 
 运行时数据会保存到本机 SQLite：
@@ -122,6 +123,16 @@ data/photo-manage.sqlite
 `data/` 已加入 `.gitignore`，不会上传到 GitHub。前端启动时会先用浏览器本地数据快速渲染，然后从 `/api/state` 拉取后端状态；每次项目、素材、画布位置变化后，会自动防抖保存到后端。
 
 当前 SQLite 里仍会保存图片的 data URL 字符串，适合 MVP 和小规模测试。素材量继续增长后，建议把原图迁到 Cloudflare R2 / S3，对数据库只保留 file URL、AI 识别结果和画布关系。
+
+AI 识别日志会保存到 `ai_jobs` 表，可用于排查识别失败：
+
+```text
+GET /api/ai-jobs
+GET /api/ai-jobs?assetId=素材ID
+GET /api/ai-jobs?status=failed&limit=20
+```
+
+日志记录包含任务状态、素材 ID、模型名、文件名、推荐项目、画布列、置信度、耗时、错误码和错误信息。日志不会保存完整图片 base64，只保存请求摘要和图片大小估算。
 
 如果前端和后端分离部署，可以在浏览器控制台设置后端地址：
 

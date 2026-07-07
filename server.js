@@ -99,6 +99,11 @@ const server = http.createServer(async (request, response) => {
     return;
   }
 
+  if (url.pathname === "/api/ai-jobs") {
+    handleAiJobs(request, response, url);
+    return;
+  }
+
   const assetMatch = url.pathname.match(/^\/api\/assets\/([^/]+)$/);
   if (assetMatch) {
     await handleAsset(request, response, decodeURIComponent(assetMatch[1]));
@@ -571,10 +576,36 @@ function initDatabase() {
       updated_at TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS ai_jobs (
+      id TEXT PRIMARY KEY,
+      asset_id TEXT,
+      type TEXT NOT NULL DEFAULT 'image_analysis',
+      status TEXT NOT NULL,
+      vision_model TEXT,
+      classifier_model TEXT,
+      file_name TEXT,
+      recommended_project_id TEXT,
+      canvas_column_id TEXT,
+      confidence REAL,
+      duration_ms INTEGER,
+      error_code TEXT,
+      error_status INTEGER,
+      error_message TEXT,
+      request_summary TEXT NOT NULL DEFAULT '{}',
+      response_json TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      completed_at TEXT
+    );
+
     CREATE INDEX IF NOT EXISTS idx_assets_sort_order ON assets(sort_order);
     CREATE INDEX IF NOT EXISTS idx_assets_updated_at ON assets(updated_at);
+    CREATE INDEX IF NOT EXISTS idx_ai_jobs_asset_id ON ai_jobs(asset_id);
+    CREATE INDEX IF NOT EXISTS idx_ai_jobs_status ON ai_jobs(status);
+    CREATE INDEX IF NOT EXISTS idx_ai_jobs_created_at ON ai_jobs(created_at);
   `);
   migrateStateJsonToDatabase(database);
+  markInterruptedAiJobs(database);
   return database;
 }
 
@@ -597,6 +628,22 @@ function migrateStateJsonToDatabase(database) {
   } catch (error) {
     console.error(`[DB:MIGRATE_ERROR] ${new Date().toISOString()} message=${error.message}`);
   }
+}
+
+function markInterruptedAiJobs(database) {
+  const now = new Date().toISOString();
+  database
+    .prepare(
+      `UPDATE ai_jobs
+       SET status = 'failed',
+           error_code = 'AI_JOB_INTERRUPTED',
+           error_status = 500,
+           error_message = '服务重启或进程退出导致 AI job 中断。',
+           updated_at = ?,
+           completed_at = ?
+       WHERE status = 'processing'`
+    )
+    .run(now, now);
 }
 
 function readStoredState() {
@@ -680,6 +727,155 @@ function parseJsonValue(value, fallback) {
   } catch {
     return fallback;
   }
+}
+
+function createAiJobRecord(record) {
+  const job = normalizeAiJobRecord(record);
+  db
+    .prepare(
+      `INSERT OR REPLACE INTO ai_jobs (
+        id,
+        asset_id,
+        type,
+        status,
+        vision_model,
+        classifier_model,
+        file_name,
+        recommended_project_id,
+        canvas_column_id,
+        confidence,
+        duration_ms,
+        error_code,
+        error_status,
+        error_message,
+        request_summary,
+        response_json,
+        created_at,
+        updated_at,
+        completed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      job.id,
+      job.assetId,
+      job.type,
+      job.status,
+      job.visionModel,
+      job.classifierModel,
+      job.fileName,
+      job.recommendedProjectId,
+      job.canvasColumnId,
+      job.confidence,
+      job.durationMs,
+      job.errorCode,
+      job.errorStatus,
+      job.errorMessage,
+      JSON.stringify(job.requestSummary),
+      job.responseJson ? JSON.stringify(job.responseJson) : null,
+      job.createdAt,
+      job.updatedAt,
+      job.completedAt
+    );
+  return job;
+}
+
+function updateAiJobRecord(jobId, patch) {
+  const existing = readAiJobRecord(jobId);
+  if (!existing) return createAiJobRecord({ ...patch, id: jobId });
+  return createAiJobRecord({
+    ...existing,
+    ...patch,
+    id: jobId,
+    createdAt: existing.createdAt,
+    requestSummary: patch.requestSummary || existing.requestSummary
+  });
+}
+
+function readAiJobRecord(jobId) {
+  if (!jobId) return null;
+  const row = db.prepare("SELECT * FROM ai_jobs WHERE id = ?").get(String(jobId));
+  return row ? mapAiJobRow(row) : null;
+}
+
+function listAiJobRecords({ assetId = "", status = "", limit = 50 } = {}) {
+  const safeLimit = Math.min(100, Math.max(1, Number(limit) || 50));
+  const clauses = [];
+  const params = [];
+  if (assetId) {
+    clauses.push("asset_id = ?");
+    params.push(String(assetId));
+  }
+  if (status) {
+    clauses.push("status = ?");
+    params.push(String(status));
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const rows = db
+    .prepare(`SELECT * FROM ai_jobs ${where} ORDER BY created_at DESC LIMIT ?`)
+    .all(...params, safeLimit);
+  return rows.map(mapAiJobRow);
+}
+
+function mapAiJobRow(row) {
+  return {
+    id: row.id,
+    assetId: row.asset_id || null,
+    type: row.type,
+    status: row.status,
+    visionModel: row.vision_model || null,
+    classifierModel: row.classifier_model || null,
+    fileName: row.file_name || "",
+    recommendedProjectId: row.recommended_project_id || null,
+    canvasColumnId: row.canvas_column_id || null,
+    confidence: row.confidence == null ? null : Number(row.confidence),
+    durationMs: row.duration_ms == null ? null : Number(row.duration_ms),
+    errorCode: row.error_code || null,
+    errorStatus: row.error_status == null ? null : Number(row.error_status),
+    errorMessage: row.error_message || null,
+    requestSummary: parseJsonValue(row.request_summary, {}),
+    responseJson: parseJsonValue(row.response_json, null),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    completedAt: row.completed_at || null
+  };
+}
+
+function normalizeAiJobRecord(value) {
+  const now = new Date().toISOString();
+  const job = value && typeof value === "object" ? value : {};
+  return {
+    id: String(job.id || crypto.randomUUID()),
+    assetId: job.assetId ? String(job.assetId) : null,
+    type: String(job.type || "image_analysis"),
+    status: ["processing", "completed", "failed"].includes(job.status) ? job.status : "processing",
+    visionModel: String(job.visionModel || qwenVisionModel),
+    classifierModel: String(job.classifierModel || qwenClassifierModel),
+    fileName: String(job.fileName || "untitled"),
+    recommendedProjectId: job.recommendedProjectId ? String(job.recommendedProjectId) : null,
+    canvasColumnId: job.canvasColumnId ? String(job.canvasColumnId) : null,
+    confidence: Number.isFinite(Number(job.confidence)) ? Number(job.confidence) : null,
+    durationMs: Number.isFinite(Number(job.durationMs)) ? Number(job.durationMs) : null,
+    errorCode: job.errorCode ? String(job.errorCode) : null,
+    errorStatus: Number.isFinite(Number(job.errorStatus)) ? Number(job.errorStatus) : null,
+    errorMessage: job.errorMessage ? String(job.errorMessage).slice(0, 2000) : null,
+    requestSummary: job.requestSummary && typeof job.requestSummary === "object" ? job.requestSummary : {},
+    responseJson: job.responseJson && typeof job.responseJson === "object" ? job.responseJson : null,
+    createdAt: typeof job.createdAt === "string" ? job.createdAt : now,
+    updatedAt: typeof job.updatedAt === "string" ? job.updatedAt : now,
+    completedAt: typeof job.completedAt === "string" ? job.completedAt : null
+  };
+}
+
+function summarizeAiRequest(body) {
+  const imageDataUrl = String(body?.imageDataUrl || "");
+  return {
+    fileName: String(body?.fileName || "untitled"),
+    preferredProjectId: body?.preferredProjectId ? String(body.preferredProjectId) : null,
+    projectCount: Array.isArray(body?.projects) ? body.projects.length : 0,
+    canvasColumnCount: Array.isArray(body?.canvasColumns) ? body.canvasColumns.length : 0,
+    hasImageDataUrl: imageDataUrl.startsWith("data:image/"),
+    imageBytesApprox: imageDataUrl ? Math.round(imageDataUrl.length * 0.75) : 0
+  };
 }
 
 function sanitizeStoredState(value) {
@@ -834,6 +1030,28 @@ async function handleAssets(request, response) {
   sendJson(response, 405, { error: "METHOD_NOT_ALLOWED" });
 }
 
+function handleAiJobs(request, response, url) {
+  if (request.method === "OPTIONS") {
+    sendJson(response, 204, {});
+    return;
+  }
+
+  if (request.method !== "GET") {
+    sendJson(response, 405, { error: "METHOD_NOT_ALLOWED" });
+    return;
+  }
+
+  const jobs = listAiJobRecords({
+    assetId: url.searchParams.get("assetId") || "",
+    status: url.searchParams.get("status") || "",
+    limit: url.searchParams.get("limit") || 50
+  });
+  sendJson(response, 200, {
+    jobs,
+    count: jobs.length
+  });
+}
+
 async function handleAsset(request, response, assetId) {
   if (request.method === "OPTIONS") {
     sendJson(response, 204, {});
@@ -952,6 +1170,7 @@ async function handleAssetAnalyze(request, response, assetId) {
 
 async function handleAnalyzeImage(request, response) {
   const startedAt = Date.now();
+  let logJobId = null;
   if (request.method === "OPTIONS") {
     sendJson(response, 204, {});
     return;
@@ -972,12 +1191,47 @@ async function handleAnalyzeImage(request, response) {
 
   try {
     const body = await readJsonBody(request);
+    const createdAt = new Date().toISOString();
+    logJobId = crypto.randomUUID();
+    createAiJobRecord({
+      id: logJobId,
+      assetId: body.assetId || null,
+      type: "sync_image_analysis",
+      status: "processing",
+      fileName: body.fileName || "untitled",
+      requestSummary: summarizeAiRequest(body),
+      createdAt,
+      updatedAt: createdAt
+    });
     const analysis = await analyzeImageWithQwen(body);
+    const completedAt = new Date().toISOString();
+    updateAiJobRecord(logJobId, {
+      status: "completed",
+      recommendedProjectId: analysis.recommended_project_id,
+      canvasColumnId: analysis.canvas_column_id,
+      confidence: analysis.confidence,
+      durationMs: Date.now() - startedAt,
+      responseJson: analysis,
+      updatedAt: completedAt,
+      completedAt
+    });
     console.log(
       `[AI] ${new Date().toISOString()} vision=${qwenVisionModel} classifier=${qwenClassifierModel} file="${String(body.fileName || "untitled")}" recommended=${analysis.recommended_project_id} column=${analysis.canvas_column_id} confidence=${analysis.confidence} duration=${Date.now() - startedAt}ms`
     );
     sendJson(response, 200, { analysis });
   } catch (error) {
+    if (logJobId) {
+      const completedAt = new Date().toISOString();
+      updateAiJobRecord(logJobId, {
+        status: "failed",
+        durationMs: Date.now() - startedAt,
+        errorCode: error.code || "AI_IMAGE_ANALYSIS_FAILED",
+        errorStatus: error.statusCode || 500,
+        errorMessage: error.publicMessage || error.message || "图片识别失败，请稍后重试。",
+        updatedAt: completedAt,
+        completedAt
+      });
+    }
     console.error(
       `[AI:ERROR] ${new Date().toISOString()} code=${error.code || "UNKNOWN"} status=${error.statusCode || 500} duration=${Date.now() - startedAt}ms message=${error.publicMessage || error.message}`
     );
@@ -1039,28 +1293,46 @@ function handleAnalyzeImageJobStatus(request, response, jobId) {
   cleanupAiJobs();
   const job = aiJobs.get(jobId);
   if (!job) {
-    sendJson(response, 404, {
-      error: "AI_JOB_NOT_FOUND",
-      message: "识别任务不存在或已过期，请重新上传。"
+    const storedJob = readAiJobRecord(jobId);
+    if (!storedJob) {
+      sendJson(response, 404, {
+        error: "AI_JOB_NOT_FOUND",
+        message: "识别任务不存在或已过期，请重新上传。"
+      });
+      return;
+    }
+
+    sendJson(response, 200, {
+      jobId: storedJob.id,
+      status: storedJob.status,
+      fileName: storedJob.fileName,
+      assetId: storedJob.assetId,
+      createdAt: storedJob.createdAt,
+      updatedAt: storedJob.updatedAt,
+      completedAt: storedJob.completedAt,
+      analysis: storedJob.status === "completed" ? storedJob.responseJson : null,
+      asset: storedJob.status === "completed" || storedJob.status === "failed" ? getStoredAsset(storedJob.assetId) : null,
+      error: storedJob.status === "failed" ? storedJob.errorCode || "AI_IMAGE_ANALYSIS_FAILED" : null,
+      message: storedJob.status === "failed" ? storedJob.errorMessage || "图片识别失败，请稍后重试。" : null
     });
     return;
   }
 
-	  sendJson(response, 200, {
-	    jobId: job.id,
-	    status: job.status,
-	    fileName: job.fileName,
+  sendJson(response, 200, {
+    jobId: job.id,
+    status: job.status,
+    fileName: job.fileName,
     assetId: job.assetId || null,
-	    createdAt: job.createdAt,
-	    updatedAt: job.updatedAt,
-	    completedAt: job.completedAt,
-	    analysis: job.status === "completed" ? job.analysis : null,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+    completedAt: job.completedAt,
+    analysis: job.status === "completed" ? job.analysis : null,
     asset: job.status === "completed" || job.status === "failed" ? getStoredAsset(job.assetId) : null,
-	    error: job.status === "failed" ? job.error?.code || "AI_IMAGE_ANALYSIS_FAILED" : null,
-	    message: job.status === "failed" ? job.error?.message || "图片识别失败，请稍后重试。" : null
-	  });
-	}
-	
+    error: job.status === "failed" ? job.error?.code || "AI_IMAGE_ANALYSIS_FAILED" : null,
+    message: job.status === "failed" ? job.error?.message || "图片识别失败，请稍后重试。" : null
+  });
+}
+
 function createAnalyzeImageJob(body) {
   const jobId = crypto.randomUUID();
   const now = new Date().toISOString();
@@ -1076,6 +1348,16 @@ function createAnalyzeImageJob(body) {
     error: null
   };
   aiJobs.set(jobId, job);
+  createAiJobRecord({
+    id: job.id,
+    assetId: job.assetId,
+    type: "async_image_analysis",
+    status: job.status,
+    fileName: job.fileName,
+    requestSummary: summarizeAiRequest(body),
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt
+  });
   runAnalyzeImageJob(job, body);
   return job;
 }
@@ -1103,6 +1385,16 @@ function runAnalyzeImageJob(job, body) {
           updatedAt: job.completedAt
         }));
       }
+      updateAiJobRecord(job.id, {
+        status: "completed",
+        recommendedProjectId: analysis.recommended_project_id,
+        canvasColumnId: analysis.canvas_column_id,
+        confidence: analysis.confidence,
+        durationMs: Date.now() - startedAt,
+        responseJson: analysis,
+        updatedAt: job.completedAt,
+        completedAt: job.completedAt
+      });
       console.log(
         `[AI] ${job.completedAt} async=true vision=${qwenVisionModel} classifier=${qwenClassifierModel} file="${job.fileName}" recommended=${analysis.recommended_project_id} column=${analysis.canvas_column_id} confidence=${analysis.confidence} duration=${Date.now() - startedAt}ms`
       );
@@ -1127,6 +1419,15 @@ function runAnalyzeImageJob(job, body) {
           updatedAt: job.completedAt
         }));
       }
+      updateAiJobRecord(job.id, {
+        status: "failed",
+        durationMs: Date.now() - startedAt,
+        errorCode: job.error.code,
+        errorStatus: job.error.statusCode,
+        errorMessage: job.error.message,
+        updatedAt: job.completedAt,
+        completedAt: job.completedAt
+      });
       console.error(
         `[AI:ERROR] ${job.completedAt} async=true code=${job.error.code} status=${job.error.statusCode} duration=${Date.now() - startedAt}ms message=${job.error.message}`
       );
