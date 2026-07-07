@@ -103,7 +103,7 @@ POST /api/analyze-image
 
 ## 后端状态持久化
 
-当前版本新增轻量后端状态接口，不需要先接数据库：
+当前版本使用本地 SQLite 做后端数据库：
 
 ```text
 GET /api/state
@@ -111,13 +111,17 @@ PUT /api/state
 GET /api/health
 ```
 
-运行时数据会保存到本机：
+运行时数据会保存到本机 SQLite：
 
 ```text
-data/state.json
+data/photo-manage.sqlite
 ```
 
+旧版本的 `data/state.json` 会在服务启动时自动迁移进 SQLite；迁移后 `state.json` 只作为旧数据备份，不再作为主存储。
+
 `data/` 已加入 `.gitignore`，不会上传到 GitHub。前端启动时会先用浏览器本地数据快速渲染，然后从 `/api/state` 拉取后端状态；每次项目、素材、画布位置变化后，会自动防抖保存到后端。
+
+当前 SQLite 里仍会保存图片的 data URL 字符串，适合 MVP 和小规模测试。素材量继续增长后，建议把原图迁到 Cloudflare R2 / S3，对数据库只保留 file URL、AI 识别结果和画布关系。
 
 如果前端和后端分离部署，可以在浏览器控制台设置后端地址：
 

@@ -1866,6 +1866,64 @@ node --check dist/app.js 通过
 dist/app.js 与 app.js 一致
 ```
 
+## 2026-07-07 后端状态迁移到 SQLite
+
+用户要求：
+
+```text
+把图片 / 素材数据改成数据库存储。
+```
+
+实现判断：
+
+```text
+当前项目仍保持无 npm 依赖。
+本地 Node 运行时支持内置 node:sqlite，因此先使用 SQLite 作为数据库层。
+这一步把主存储从 data/state.json 迁到 data/photo-manage.sqlite。
+图片仍暂时以 data URL 字符串存在 asset 记录里，后续大量素材时再迁 Cloudflare R2 / S3。
+```
+
+已调整：
+
+```text
+server.js
+  引入 node:sqlite 的 DatabaseSync
+  新增 databaseFile = data/photo-manage.sqlite
+  启动时 initDatabase：
+    创建 metadata
+    创建 ui_state
+    创建 assets
+    创建 assets 排序 / 更新时间索引
+    开启 WAL 和 NORMAL synchronous
+  首次启动自动迁移 data/state.json：
+    读取旧 JSON
+    sanitize 后写入 SQLite
+    metadata.state_json_migrated = 1
+  readStoredState / writeStoredState 改为 SQLite 读写
+  /api/state PUT 不再接受前端传回的 assets：
+    assets 只保留数据库已有值
+    避免旧浏览器快照覆盖后端 authoritative asset
+
+README.md
+  后端状态持久化说明从 data/state.json 更新为 data/photo-manage.sqlite
+  说明 state.json 迁移后只作为旧数据备份
+  说明当前 SQLite 仍保存图片 data URL，后续建议迁对象存储
+```
+
+验证结果：
+
+```text
+node --check server.js 通过
+node --check app.js 通过
+重启服务后日志显示：
+  migrated 12 assets from data/state.json to photo-manage.sqlite
+GET /api/assets 返回 12 条素材
+GET /api/state 返回：
+  assets = 12
+  projects = 4
+  feedback = 7
+```
+
 ## 2026-07-02 账号密码登录保护
 
 用户要求：

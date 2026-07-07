@@ -3,6 +3,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
+const { DatabaseSync } = require("node:sqlite");
 
 const root = __dirname;
 loadEnvFile(path.join(root, ".env"));
@@ -17,6 +18,7 @@ const maxJsonBytes = Number(process.env.MAX_UPLOAD_JSON_BYTES || 24 * 1024 * 102
 const maxStateJsonBytes = Number(process.env.MAX_STATE_JSON_BYTES || 200 * 1024 * 1024);
 const dataDir = path.join(root, "data");
 const stateFile = path.join(dataDir, "state.json");
+const databaseFile = path.join(dataDir, "photo-manage.sqlite");
 const authEnabled = process.env.AUTH_ENABLED !== "false";
 const authUsername = process.env.ADMIN_USERNAME || process.env.AUTH_USERNAME || "admin";
 const authPassword = process.env.ADMIN_PASSWORD || process.env.AUTH_PASSWORD || "";
@@ -45,6 +47,8 @@ const mimeTypes = {
   ".webp": "image/webp",
   ".svg": "image/svg+xml"
 };
+
+const db = initDatabase();
 
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, `http://${request.headers.host}`);
@@ -516,7 +520,7 @@ async function handleState(request, response) {
       const body = await readJsonBody(request, maxStateJsonBytes, "保存数据太大，请先减少本地视频或改接对象存储。");
       const previousState = readStoredStateOrDefault();
       const state = sanitizeStoredState(body.state || body);
-      state.assets = mergeStoredAssets(previousState.assets, state.assets);
+      state.assets = previousState.assets;
       state.updatedAt = new Date().toISOString();
       writeStoredState(state);
       sendJson(response, 200, {
@@ -538,38 +542,144 @@ async function handleState(request, response) {
   sendJson(response, 405, { error: "METHOD_NOT_ALLOWED" });
 }
 
-function mergeStoredAssets(existingAssets, incomingAssets) {
-  if (!Array.isArray(incomingAssets) || !incomingAssets.length) return existingAssets || [];
-  const merged = new Map();
-  (existingAssets || []).forEach((asset) => merged.set(asset.id, asset));
-  incomingAssets.forEach((asset) => {
-    const current = merged.get(asset.id);
-    if (!current) {
-      merged.set(asset.id, asset);
-      return;
+function initDatabase() {
+  fs.mkdirSync(dataDir, { recursive: true });
+  const database = new DatabaseSync(databaseFile);
+  database.exec(`
+    PRAGMA journal_mode = WAL;
+    PRAGMA synchronous = NORMAL;
+
+    CREATE TABLE IF NOT EXISTS metadata (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS ui_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      deleted_project_ids TEXT NOT NULL DEFAULT '[]',
+      projects TEXT NOT NULL DEFAULT '[]',
+      canvas_layouts TEXT NOT NULL DEFAULT '{}',
+      feedback TEXT NOT NULL DEFAULT '[]',
+      updated_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS assets (
+      id TEXT PRIMARY KEY,
+      data TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT,
+      updated_at TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_assets_sort_order ON assets(sort_order);
+    CREATE INDEX IF NOT EXISTS idx_assets_updated_at ON assets(updated_at);
+  `);
+  migrateStateJsonToDatabase(database);
+  return database;
+}
+
+function migrateStateJsonToDatabase(database) {
+  const migrated = database.prepare("SELECT value FROM metadata WHERE key = ?").get("state_json_migrated");
+  if (migrated?.value === "1" || !fs.existsSync(stateFile)) return;
+
+  try {
+    const raw = fs.readFileSync(stateFile, "utf8");
+    if (raw.trim()) {
+      const state = sanitizeStoredState(JSON.parse(raw));
+      writeStoredStateToDatabase(database, state);
+      console.log(
+        `[DB] ${new Date().toISOString()} migrated ${state.assets.length} assets from data/state.json to ${path.basename(databaseFile)}`
+      );
     }
-    const currentTime = Date.parse(current.updatedAt || current.createdAt || 0) || 0;
-    const incomingTime = Date.parse(asset.updatedAt || asset.createdAt || 0) || 0;
-    if (incomingTime >= currentTime) merged.set(asset.id, asset);
-  });
-  const incomingIds = new Set(incomingAssets.map((asset) => asset.id));
-  return [...incomingAssets, ...(existingAssets || []).filter((asset) => !incomingIds.has(asset.id))]
-    .map((asset) => merged.get(asset.id) || asset)
-    .filter((asset, index, list) => list.findIndex((item) => item.id === asset.id) === index);
+    database
+      .prepare("INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)")
+      .run("state_json_migrated", "1");
+  } catch (error) {
+    console.error(`[DB:MIGRATE_ERROR] ${new Date().toISOString()} message=${error.message}`);
+  }
 }
 
 function readStoredState() {
-  if (!fs.existsSync(stateFile)) return null;
-  const raw = fs.readFileSync(stateFile, "utf8");
-  if (!raw.trim()) return null;
-  return sanitizeStoredState(JSON.parse(raw));
+  return readStoredStateFromDatabase(db);
 }
 
 function writeStoredState(state) {
-  fs.mkdirSync(dataDir, { recursive: true });
-  const tmpFile = `${stateFile}.${process.pid}.tmp`;
-  fs.writeFileSync(tmpFile, `${JSON.stringify(state, null, 2)}\n`);
-  fs.renameSync(tmpFile, stateFile);
+  writeStoredStateToDatabase(db, state);
+}
+
+function readStoredStateFromDatabase(database) {
+  const stateRow = database.prepare("SELECT * FROM ui_state WHERE id = 1").get();
+  const assetRows = database
+    .prepare("SELECT data FROM assets ORDER BY sort_order ASC, updated_at DESC, created_at DESC")
+    .all();
+  if (!stateRow && !assetRows.length) return null;
+
+  return sanitizeStoredState({
+    deletedProjectIds: parseJsonValue(stateRow?.deleted_project_ids, []),
+    projects: parseJsonValue(stateRow?.projects, []),
+    assets: assetRows.map((row) => parseJsonValue(row.data, null)).filter(Boolean),
+    canvasLayouts: parseJsonValue(stateRow?.canvas_layouts, {}),
+    feedback: parseJsonValue(stateRow?.feedback, []),
+    updatedAt: stateRow?.updated_at || null
+  });
+}
+
+function writeStoredStateToDatabase(database, value) {
+  const state = sanitizeStoredState(value);
+  const updatedAt = state.updatedAt || new Date().toISOString();
+
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    database
+      .prepare(
+        `INSERT OR REPLACE INTO ui_state (
+          id,
+          deleted_project_ids,
+          projects,
+          canvas_layouts,
+          feedback,
+          updated_at
+        ) VALUES (1, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        JSON.stringify(state.deletedProjectIds),
+        JSON.stringify(state.projects),
+        JSON.stringify(state.canvasLayouts),
+        JSON.stringify(state.feedback),
+        updatedAt
+      );
+
+    database.prepare("DELETE FROM assets").run();
+    const insertAsset = database.prepare(
+      `INSERT INTO assets (id, data, sort_order, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)`
+    );
+    state.assets.forEach((asset, index) => {
+      const normalized = sanitizeStoredAsset(asset);
+      if (!normalized) return;
+      insertAsset.run(
+        normalized.id,
+        JSON.stringify(normalized),
+        index,
+        normalized.createdAt,
+        normalized.updatedAt
+      );
+    });
+
+    database.exec("COMMIT");
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function parseJsonValue(value, fallback) {
+  if (typeof value !== "string" || !value.trim()) return fallback;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
 }
 
 function sanitizeStoredState(value) {
